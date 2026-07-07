@@ -127,8 +127,8 @@ impl Computer {
     }
 
     /// Remove an agent from the computer.
-    pub fn remove_agent(&mut self, agent_id: String) {
-        self.agent_ids.retain(|id| id != &agent_id);
+    pub fn remove_agent(&mut self, agent_id: &str) {
+        self.agent_ids.retain(|id| id != agent_id);
     }
 
     /// Add a runtime to the computer.

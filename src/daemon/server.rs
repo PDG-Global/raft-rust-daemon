@@ -41,7 +41,7 @@ pub struct ServerManager {
     /// The agents.
     agents: DashMap<String, Agent>,
     /// The state manager.
-    state_manager: Arc<dyn crate::daemon::state::state_manager::StateMgr>,
+    state_manager: Arc<dyn crate::daemon::state::StateMgr>,
     /// The WebSocket connection.
     ws: Option<WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>>,
     /// The server URL.
@@ -56,7 +56,7 @@ impl ServerManager {
         server: Server,
         computers: DashMap<String, Computer>,
         agents: DashMap<String, Agent>,
-        state_manager: Arc<dyn crate::daemon::state::state_manager::StateMgr>,
+        state_manager: Arc<dyn crate::daemon::state::StateMgr>,
         server_url: String,
         api_key: String,
     ) -> Self {
@@ -72,6 +72,12 @@ impl ServerManager {
     }
 
     /// Connect to the server.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `server_url` uses an unsupported or unencrypted
+    /// scheme, the WebSocket handshake fails, or the authentication message
+    /// cannot be sent.
     pub async fn connect(&mut self) -> Result<()> {
         info!("Connecting to server: {}", self.server_url);
 
@@ -102,6 +108,10 @@ impl ServerManager {
     }
 
     /// Disconnect from the server.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the WebSocket close handshake fails.
     pub async fn disconnect(&mut self) -> Result<()> {
         info!("Disconnecting from server");
 
@@ -114,6 +124,12 @@ impl ServerManager {
     }
 
     /// Send a message to the server.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if there is no active connection, the message cannot
+    /// be serialised, the send fails, or the server response is unexpected or
+    /// malformed.
     pub async fn send_message(&mut self, message: Message) -> Result<String> {
         let ws = self
             .ws
@@ -142,7 +158,9 @@ impl ServerManager {
                 let resp: WsMessageType = serde_json::from_str(&text)?;
                 match resp {
                     WsMessageType::ServerToDaemon { id, .. } => Ok(id),
-                    _ => Err(anyhow::anyhow!("Unexpected response type")),
+                    WsMessageType::DaemonToServer { .. } => {
+                        Err(anyhow::anyhow!("Unexpected response type"))
+                    }
                 }
             }
             Some(Ok(_)) => Err(anyhow::anyhow!("Unexpected non-text response")),
@@ -152,7 +170,12 @@ impl ServerManager {
     }
 
     /// Get server info.
-    pub async fn get_server_info(&self) -> Result<Server> {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no server is recorded in state and the live fetch is
+    /// unimplemented.
+    pub fn get_server_info(&self) -> Result<Server> {
         // Get the server from state manager
         if let Some(server) = self.state_manager.get_state().server.as_ref() {
             return Ok(server.clone());

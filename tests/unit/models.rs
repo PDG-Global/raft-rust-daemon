@@ -130,14 +130,14 @@ fn test_message_methods() {
         "channel-1".to_string(),
         None,
         "agent-1".to_string(),
-        123456,
+        123_456,
     );
 
     assert_eq!(message.r#type, MessageType::Message);
     assert_eq!(message.content, "Test message");
     assert_eq!(message.channel_id, "channel-1");
     assert_eq!(message.sender_id, "agent-1");
-    assert_eq!(message.timestamp, 123456);
+    assert_eq!(message.timestamp, 123_456);
     assert!(!message.is_read());
 }
 

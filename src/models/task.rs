@@ -142,34 +142,38 @@ impl Task {
 
     /// Claim the task.
     pub fn claim(&mut self, agent_id: String) {
+        let now = chrono::Utc::now().timestamp_millis();
         self.status = TaskStatus::Claimed;
         self.assigned_to = agent_id;
-        self.claimed_at = Some(chrono::Utc::now().timestamp_millis());
-        self.updated_at = self.claimed_at.unwrap();
+        self.claimed_at = Some(now);
+        self.updated_at = now;
     }
 
     /// Complete the task.
     pub fn complete(&mut self, response: String) {
+        let now = chrono::Utc::now().timestamp_millis();
         self.status = TaskStatus::Completed;
         self.response = Some(response);
-        self.completed_at = Some(chrono::Utc::now().timestamp_millis());
-        self.updated_at = self.completed_at.unwrap();
+        self.completed_at = Some(now);
+        self.updated_at = now;
     }
 
     /// Cancel the task.
     pub fn cancel(&mut self) {
+        let now = chrono::Utc::now().timestamp_millis();
         self.status = TaskStatus::Cancelled;
-        self.cancelled_at = Some(chrono::Utc::now().timestamp_millis());
-        self.updated_at = self.cancelled_at.unwrap();
+        self.cancelled_at = Some(now);
+        self.updated_at = now;
     }
 
     /// Fail the task.
-    pub fn fail(&mut self, error: String) {
+    pub fn fail(&mut self, error: &str) {
+        let now = chrono::Utc::now().timestamp_millis();
         self.status = TaskStatus::Failed;
         self.metadata
             .insert("error".to_string(), serde_json::json!(error));
-        self.failed_at = Some(chrono::Utc::now().timestamp_millis());
-        self.updated_at = self.failed_at.unwrap();
+        self.failed_at = Some(now);
+        self.updated_at = now;
     }
 
     /// Check if the task is pending.

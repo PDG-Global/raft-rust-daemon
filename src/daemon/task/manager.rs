@@ -4,6 +4,7 @@ use crate::models::{Task, TaskStatus};
 use dashmap::DashMap;
 
 /// A task manager for managing tasks.
+#[derive(Default)]
 pub struct TaskManager {
     /// All tasks.
     tasks: DashMap<String, Task>,

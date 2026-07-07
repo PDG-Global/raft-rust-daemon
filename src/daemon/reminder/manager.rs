@@ -4,6 +4,7 @@ use crate::models::Reminder;
 use dashmap::DashMap;
 
 /// A reminder manager for managing reminders.
+#[derive(Default)]
 pub struct ReminderManager {
     /// All reminders.
     reminders: DashMap<String, Reminder>,

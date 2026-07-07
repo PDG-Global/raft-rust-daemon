@@ -7,7 +7,7 @@ use std::sync::Arc;
 use tokio::time::{Duration, sleep};
 use tracing::info;
 
-use crate::daemon::state::state_manager::StateMgr;
+use crate::daemon::state::StateMgr;
 use crate::models::{Computer, ComputerStatus};
 
 /// Computer manager for managing computers.
@@ -49,6 +49,11 @@ impl ComputerManager {
     }
 
     /// Start a computer.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the computer is not found or the state cannot be
+    /// persisted.
     pub async fn start_computer(&self, computer_id: String) -> Result<()> {
         let name = {
             let mut computer = self
@@ -75,6 +80,11 @@ impl ComputerManager {
     }
 
     /// Stop a computer.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the computer is not found or the state cannot be
+    /// persisted.
     pub async fn stop_computer(&self, computer_id: String) -> Result<()> {
         let name = {
             let mut computer = self
@@ -96,6 +106,11 @@ impl ComputerManager {
     }
 
     /// Reconnect a computer.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the computer is not found or the state cannot be
+    /// persisted.
     pub async fn reconnect_computer(&self, computer_id: String) -> Result<()> {
         let name = {
             let mut computer = self
@@ -122,6 +137,11 @@ impl ComputerManager {
     }
 
     /// Remove a computer.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the computer is not found or the state cannot be
+    /// persisted.
     pub async fn remove_computer(&self, computer_id: String) -> Result<()> {
         {
             let mut computer = self

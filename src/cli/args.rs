@@ -64,6 +64,11 @@ impl CliArgs {
     /// Returns an error if no key is configured, rather than silently
     /// substituting a placeholder that would be sent to the server as an
     /// invalid credential.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no API key is provided via `--api-key`, a profile,
+    /// or the `RAFT_API_KEY` environment variable.
     pub fn api_key(&self) -> Result<String> {
         if let Some(key) = &self.api_key {
             return Ok(key.clone());

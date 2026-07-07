@@ -105,6 +105,10 @@ pub struct Agent {
 
 impl Agent {
     /// Create a new agent.
+    ///
+    /// Constructors for plain data records reasonably exceed clippy's
+    /// argument limit; the explicitness aids call-site readability.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: String,
         name: String,
@@ -139,6 +143,7 @@ impl Agent {
     }
 
     /// Create a new agent with default values.
+    #[allow(clippy::too_many_arguments)]
     pub fn with_defaults(
         id: String,
         name: String,
@@ -189,8 +194,8 @@ impl Agent {
     }
 
     /// Leave a channel from the agent's joined channels.
-    pub fn leave_channel(&mut self, channel_id: String) {
-        self.channel_ids.retain(|id| id != &channel_id);
+    pub fn leave_channel(&mut self, channel_id: &str) {
+        self.channel_ids.retain(|id| id != channel_id);
     }
 
     /// Check if the agent is a member of a channel.

@@ -3,6 +3,7 @@
 use crate::models::{Message, MessageType};
 
 /// A message handler for managing messages.
+#[derive(Default)]
 pub struct MessageHandler {
     /// All messages.
     messages: std::collections::HashMap<String, Message>,

@@ -39,8 +39,8 @@
 //! use std::sync::Arc;
 //!
 //! use raft_daemon::daemon::agent::AgentManager;
-//! use raft_daemon::daemon::state::state::DaemonState;
-//! use raft_daemon::daemon::state::state_manager::StateMgr;
+//! use raft_daemon::daemon::state::DaemonState;
+//! use raft_daemon::daemon::state::StateMgr;
 //! use raft_daemon::models::{Agent, ResetMode, RuntimeConfig};
 //!
 //! let state = DaemonState::new(

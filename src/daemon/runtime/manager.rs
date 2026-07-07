@@ -4,6 +4,7 @@ use crate::models::Runtime;
 use dashmap::DashMap;
 
 /// A runtime manager for managing runtimes.
+#[derive(Default)]
 pub struct RuntimeManager {
     /// All runtimes.
     runtimes: DashMap<String, Runtime>,

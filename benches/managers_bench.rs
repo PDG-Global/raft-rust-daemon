@@ -16,7 +16,7 @@ use std::sync::Arc;
 use raft_daemon::daemon::agent::AgentManager;
 use raft_daemon::daemon::message::MessageHandler;
 use raft_daemon::daemon::reminder::ReminderManager;
-use raft_daemon::daemon::state::state::DaemonState;
+use raft_daemon::daemon::state::DaemonState;
 use raft_daemon::daemon::task::TaskManager;
 use raft_daemon::models::{
     Agent, Message, MessageType, Reminder, ReminderInterval, ResetMode, RuntimeConfig, Task,
@@ -83,7 +83,7 @@ fn make_message(i: usize) -> Message {
         format!("chan_{}", i % 4),
         None,
         format!("sender_{}", i % 5),
-        i as i64,
+        i64::try_from(i).unwrap_or(i64::MAX),
     )
 }
 

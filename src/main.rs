@@ -27,25 +27,25 @@ async fn main() -> Result<()> {
                     profile: args.profile(),
                 },
             };
-            cli::commands::execute_command(&command).await?;
+            cli::commands::execute_command(&command)?;
         }
         [c] if c == "stop" => {
             let command = CliCommand::Daemon {
                 command: cli::commands::DaemonCommand::Stop,
             };
-            cli::commands::execute_command(&command).await?;
+            cli::commands::execute_command(&command)?;
         }
         [c] if c == "restart" => {
             let command = CliCommand::Daemon {
                 command: cli::commands::DaemonCommand::Restart,
             };
-            cli::commands::execute_command(&command).await?;
+            cli::commands::execute_command(&command)?;
         }
         [c] if c == "status" => {
             let command = CliCommand::Daemon {
                 command: cli::commands::DaemonCommand::Status,
             };
-            cli::commands::execute_command(&command).await?;
+            cli::commands::execute_command(&command)?;
         }
         _ => {
             // Default to agent commands
@@ -128,7 +128,7 @@ async fn main() -> Result<()> {
                         std::process::exit(1);
                     }
                 };
-                cli::commands::execute_command(&command).await?;
+                cli::commands::execute_command(&command)?;
             } else {
                 eprintln!("Usage: raft-daemon <command> [args...]");
                 eprintln!();

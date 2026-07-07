@@ -5,7 +5,7 @@
 //! so that agent changes can be persisted alongside the rest of the daemon
 //! state.
 
-use crate::daemon::state::state_manager::StateMgr;
+use crate::daemon::state::StateMgr;
 use crate::models::Agent;
 use dashmap::DashMap;
 use std::sync::Arc;
@@ -14,7 +14,7 @@ use std::sync::Arc;
 #[allow(dead_code)] // state_manager reserved for future persistence wiring
 pub struct AgentManager {
     /// The state manager.
-    state_manager: Arc<dyn crate::daemon::state::state_manager::StateMgr>,
+    state_manager: Arc<dyn crate::daemon::state::StateMgr>,
     /// All agents.
     agents: DashMap<String, Agent>,
 }
@@ -105,10 +105,15 @@ impl AgentManager {
     }
 
     /// Handle a message intended for an agent.
+    ///
+    /// # Errors
+    ///
+    /// Currently always returns `Ok`; reserved for future failure modes once
+    /// a real runtime backend is wired in.
     pub fn handle_message(
         &self,
         message: crate::models::Message,
-        agent_id: String,
+        agent_id: &str,
     ) -> anyhow::Result<crate::models::AgentResponse> {
         Ok(crate::models::AgentResponse {
             id: message.id,
@@ -118,8 +123,13 @@ impl AgentManager {
     }
 
     /// Claim a task for an agent.
-    pub fn claim_task(&self, task_id: String, agent_id: String) -> anyhow::Result<()> {
-        if let Some(mut agent) = self.agents.get_mut(&agent_id) {
+    ///
+    /// # Errors
+    ///
+    /// Currently always returns `Ok`; reserved for future failure modes once
+    /// a real runtime backend is wired in.
+    pub fn claim_task(&self, task_id: &str, agent_id: &str) -> anyhow::Result<()> {
+        if let Some(mut agent) = self.agents.get_mut(agent_id) {
             agent.status = crate::models::AgentStatus::Busy;
         }
         tracing::debug!(task_id = %task_id, agent_id = %agent_id, "task claimed");
@@ -127,10 +137,15 @@ impl AgentManager {
     }
 
     /// Handle a task assigned to an agent.
+    ///
+    /// # Errors
+    ///
+    /// Currently always returns `Ok`; reserved for future failure modes once
+    /// a real runtime backend is wired in.
     pub fn handle_task(
         &self,
         task: crate::models::Task,
-        agent_id: String,
+        agent_id: &str,
     ) -> anyhow::Result<crate::models::TaskResult> {
         Ok(crate::models::TaskResult {
             id: task.id,

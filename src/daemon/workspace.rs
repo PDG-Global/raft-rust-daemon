@@ -25,7 +25,7 @@ pub struct WorkspaceManager {
     /// The workspaces.
     workspaces: DashMap<String, Workspace>,
     /// The state manager.
-    state_manager: Arc<dyn crate::daemon::state::state_manager::StateMgr>,
+    state_manager: Arc<dyn crate::daemon::state::StateMgr>,
     /// The workspace directory.
     workspace: PathBuf,
     /// The file watcher.
@@ -35,7 +35,7 @@ pub struct WorkspaceManager {
 impl WorkspaceManager {
     /// Create a new workspace manager.
     pub fn new(
-        state_manager: Arc<dyn crate::daemon::state::state_manager::StateMgr>,
+        state_manager: Arc<dyn crate::daemon::state::StateMgr>,
         workspace: PathBuf,
     ) -> Self {
         Self {
@@ -65,12 +65,16 @@ impl WorkspaceManager {
     }
 
     /// Remove a workspace.
-    pub fn remove_workspace(&mut self, agent_id: String) {
-        self.workspaces.remove(&agent_id);
+    pub fn remove_workspace(&mut self, agent_id: &str) {
+        self.workspaces.remove(agent_id);
     }
 
     /// Read a file from a workspace.
-    pub async fn read_file(&self, _agent_id: String, path: PathBuf) -> Result<String> {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file does not exist or cannot be read.
+    pub fn read_file(&self, _agent_id: String, path: PathBuf) -> Result<String> {
         // Check if file exists
         let path_display = path.display().to_string();
         let full_path = self.workspace.join(path);
@@ -85,9 +89,14 @@ impl WorkspaceManager {
     }
 
     /// Write a file to a workspace.
-    pub async fn write_file(&self, agent_id: String, path: PathBuf, content: &str) -> Result<()> {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the workspace is not found, a directory cannot be
+    /// created, or the file cannot be written.
+    pub fn write_file(&self, agent_id: &str, path: PathBuf, content: &str) -> Result<()> {
         // Check if workspace exists
-        let workspace = self.workspaces.get(&agent_id);
+        let workspace = self.workspaces.get(agent_id);
         if workspace.is_none() {
             return Err(anyhow::anyhow!("Workspace not found for agent: {agent_id}"));
         }
@@ -107,9 +116,14 @@ impl WorkspaceManager {
     }
 
     /// List files in a workspace.
-    pub async fn list_files(&self, agent_id: String, path: PathBuf) -> Result<Vec<PathBuf>> {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the workspace or directory is not found, or the
+    /// directory tree cannot be traversed.
+    pub fn list_files(&self, agent_id: &str, path: PathBuf) -> Result<Vec<PathBuf>> {
         // Check if workspace exists
-        let workspace = self.workspaces.get(&agent_id);
+        let workspace = self.workspaces.get(agent_id);
         if workspace.is_none() {
             return Err(anyhow::anyhow!("Workspace not found for agent: {agent_id}"));
         }
@@ -133,14 +147,18 @@ impl WorkspaceManager {
     }
 
     /// Get workspace info.
-    pub async fn get_workspace_info(&self, agent_id: String) -> Result<Workspace> {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the workspace is not found or the directory tree
+    /// cannot be traversed.
+    pub fn get_workspace_info(&self, agent_id: String) -> Result<Workspace> {
         // Check if workspace exists
-        let workspace = self.workspaces.get(&agent_id);
-        if workspace.is_none() {
-            return Err(anyhow::anyhow!("Workspace not found for agent: {agent_id}"));
-        }
-
-        let ws = workspace.unwrap().clone();
+        let workspace = self
+            .workspaces
+            .get(&agent_id)
+            .ok_or_else(|| anyhow::anyhow!("Workspace not found for agent: {agent_id}"))?;
+        let ws = workspace.clone();
 
         // Scan the workspace
         let mut files = Vec::new();
@@ -169,7 +187,12 @@ impl WorkspaceManager {
     }
 
     /// Start watching a workspace.
-    pub async fn start_watching(&mut self, agent_id: String) -> Result<()> {
+    ///
+    /// # Errors
+    ///
+    /// Currently always returns `Ok`; reserved for future failure modes when
+    /// real file watching is implemented.
+    pub fn start_watching(&mut self, agent_id: &str) -> Result<()> {
         // This is a simplified implementation
         // In production, you would use a proper file watcher
         info!("Starting workspace watch for agent: {}", agent_id);
@@ -187,7 +210,12 @@ impl WorkspaceManager {
     }
 
     /// Stop watching a workspace.
-    pub async fn stop_watching(&mut self, agent_id: String) -> Result<()> {
+    ///
+    /// # Errors
+    ///
+    /// Currently always returns `Ok`; reserved for future failure modes when
+    /// real file watching is implemented.
+    pub fn stop_watching(&mut self, agent_id: &str) -> Result<()> {
         // This is a simplified implementation
         info!("Stopping workspace watch for agent: {}", agent_id);
 

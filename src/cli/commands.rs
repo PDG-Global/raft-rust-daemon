@@ -416,7 +416,12 @@ pub enum DebugCommand {
 }
 
 /// Execute a CLI command.
-pub async fn execute_command(command: &CliCommand) -> Result<()> {
+///
+/// # Errors
+///
+/// Returns an error if the selected command fails to run, e.g. a failure to
+/// start the daemon, a failed HTTP request, or a malformed response.
+pub fn execute_command(command: &CliCommand) -> Result<()> {
     match command {
         CliCommand::Daemon { command } => match command {
             DaemonCommand::Start {

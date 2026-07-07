@@ -24,6 +24,44 @@ A Rust-native port of the `@botiverse/raft-daemon` npm package for agent lifecyc
 cargo install raft-daemon
 ```
 
+## Building from source
+
+Debug build:
+
+```bash
+cargo build
+```
+
+Optimised release build:
+
+```bash
+cargo build --release
+```
+
+The resulting binary is `target/release/raft-daemon`.
+
+### Cross-compiling release binaries
+
+Cross targets are supported via the standard Rust toolchain. For example, to
+build for Linux on an Apple Silicon host:
+
+```bash
+rustup target add aarch64-unknown-linux-gnu
+cargo build --release --target aarch64-unknown-linux-gnu
+```
+
+For static musl, FreeBSD, and other targets, install the matching target with
+`rustup target add` and the appropriate cross linker, then build against that
+target triple. Distributors that need to sign and notarise macOS binaries should
+do so with their own Developer ID credentials outside the build, e.g.:
+
+```bash
+codesign --force --options runtime --sign "<Developer ID Application: ...>" \
+    target/release/raft-daemon
+xcrun notarytool submit target/release/raft-daemon.zip \
+    --keychain-profile "<your profile>" --wait
+```
+
 ## Usage
 
 ```bash

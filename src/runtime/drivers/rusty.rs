@@ -99,7 +99,7 @@ impl RustyRuntime {
     }
 
     /// Initialize the runtime.
-    pub async fn initialize(&mut self, _config: RuntimeConfig) -> Result<()> {
+    pub fn initialize(&mut self, _config: RuntimeConfig) -> Result<()> {
         // Already initialized
         self.state = RuntimeStatus::Ready;
         Ok(())
@@ -139,7 +139,9 @@ impl RustyRuntime {
         }
 
         // Wait for response
-        let timeout_duration = Duration::from_secs(message.metadata.timeout as u64 / 1000);
+        // Wait for response
+        let timeout_ms = message.metadata.timeout.max(0) as u64;
+        let timeout_duration = Duration::from_millis(timeout_ms);
         let response_id = uuid::Uuid::new_v4().to_string();
         let response = timeout(timeout_duration, async {
             if let Some(ref mut stdout) = self.stdout {

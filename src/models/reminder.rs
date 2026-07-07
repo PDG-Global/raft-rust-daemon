@@ -152,14 +152,15 @@ impl Reminder {
 
     /// Fire the reminder.
     pub fn fire(&mut self) {
-        self.last_fired_at = Some(chrono::Utc::now().timestamp_millis());
+        let now = chrono::Utc::now().timestamp_millis();
+        self.last_fired_at = Some(now);
         self.fired_count += 1;
         if self.interval == ReminderInterval::Recurring {
             self.status = ReminderStatus::Active;
         } else {
             self.status = ReminderStatus::Cancelled;
         }
-        self.updated_at = self.last_fired_at.unwrap();
+        self.updated_at = now;
     }
 
     /// Check if the reminder is active.
@@ -192,10 +193,9 @@ impl Reminder {
         if self.interval != ReminderInterval::Recurring {
             return None;
         }
-        if self.last_fired_at.is_none() {
-            return Some(now + self.duration);
+        match self.last_fired_at {
+            None => Some(now + self.duration),
+            Some(last_fired) => Some(last_fired + self.interval_duration),
         }
-        let last_fired = self.last_fired_at.unwrap();
-        Some(last_fired + self.interval_duration)
     }
 }

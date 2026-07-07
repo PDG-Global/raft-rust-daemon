@@ -14,8 +14,8 @@
 //! - [`apm`]: application performance monitoring hooks
 //! - [`trace`]: OpenTelemetry tracing setup
 //!
-//! [`DaemonState`]: state::state::DaemonState
-//! [`StateMgr`]: state::state_manager::StateMgr
+//! [`DaemonState`]: state::DaemonState
+//! [`StateMgr`]: state::StateMgr
 //! [`AgentManager`]: agent::AgentManager
 
 pub mod agent;

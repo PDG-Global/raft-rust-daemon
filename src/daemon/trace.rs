@@ -30,7 +30,7 @@ pub struct TraceManager {
     /// The traces.
     traces: DashMap<String, TraceEntry>,
     /// The state manager.
-    state_manager: Arc<dyn crate::daemon::state::state_manager::StateMgr>,
+    state_manager: Arc<dyn crate::daemon::state::StateMgr>,
     /// The trace enabled flag.
     trace_enabled: bool,
     /// The trace upload interval.
@@ -40,7 +40,7 @@ pub struct TraceManager {
 impl TraceManager {
     /// Create a new trace manager.
     pub fn new(
-        state_manager: Arc<dyn crate::daemon::state::state_manager::StateMgr>,
+        state_manager: Arc<dyn crate::daemon::state::StateMgr>,
         trace_enabled: bool,
         trace_upload_interval: Duration,
     ) -> Self {
@@ -53,13 +53,17 @@ impl TraceManager {
     }
 
     /// Start tracing.
-    pub async fn start(self: Arc<Self>) -> Result<()> {
+    ///
+    /// # Errors
+    ///
+    /// Currently always succeeds; reserved for future spawn-time failures.
+    pub fn start(self: Arc<Self>) -> Result<()> {
         // Spawn a task to upload traces periodically
         if self.trace_enabled {
             tokio::spawn(async move {
                 loop {
                     sleep(self.trace_upload_interval).await;
-                    if let Err(_e) = self.upload().await {
+                    if let Err(_e) = self.upload() {
                         // Log the error but continue the loop
                     }
                 }
@@ -70,7 +74,11 @@ impl TraceManager {
     }
 
     /// Stop tracing.
-    pub async fn stop(&self) -> Result<()> {
+    ///
+    /// # Errors
+    ///
+    /// Currently always succeeds; reserved for future shutdown failures.
+    pub fn stop(&self) -> Result<()> {
         // Stop the upload task
         // This is a simplified implementation
         Ok(())
@@ -91,8 +99,8 @@ impl TraceManager {
     }
 
     /// Update a trace entry's duration.
-    pub fn update_duration(&self, id: String, duration: i64) {
-        if let Some(mut entry) = self.traces.get_mut(&id) {
+    pub fn update_duration(&self, id: &str, duration: i64) {
+        if let Some(mut entry) = self.traces.get_mut(id) {
             entry.duration = duration;
         }
     }
@@ -126,7 +134,11 @@ impl TraceManager {
     }
 
     /// Upload traces.
-    pub async fn upload(&self) -> Result<()> {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the trace entries cannot be serialised.
+    pub fn upload(&self) -> Result<()> {
         // This is a simplified implementation
         // In production, you would upload traces to a tracing backend
         info!("Uploading traces");

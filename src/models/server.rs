@@ -37,6 +37,10 @@ pub struct Server {
 
 impl Server {
     /// Create a new server.
+    ///
+    /// Constructors for plain data records reasonably exceed clippy's
+    /// argument limit; the explicitness aids call-site readability.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: String,
         name: String,
@@ -65,6 +69,7 @@ impl Server {
     }
 
     /// Create a new server with defaults.
+    #[allow(clippy::too_many_arguments)]
     pub fn with_defaults(
         id: String,
         name: String,
@@ -100,8 +105,8 @@ impl Server {
     }
 
     /// Remove an agent from the server.
-    pub fn remove_agent(&mut self, agent_id: String) {
-        self.agents.retain(|id| id != &agent_id);
+    pub fn remove_agent(&mut self, agent_id: &str) {
+        self.agents.retain(|id| id != agent_id);
     }
 
     /// Add a channel to the server.
@@ -112,8 +117,8 @@ impl Server {
     }
 
     /// Remove a channel from the server.
-    pub fn remove_channel(&mut self, channel_id: String) {
-        self.channel_ids.retain(|id| id != &channel_id);
+    pub fn remove_channel(&mut self, channel_id: &str) {
+        self.channel_ids.retain(|id| id != channel_id);
     }
 
     /// Add a member to the server.
@@ -124,8 +129,8 @@ impl Server {
     }
 
     /// Remove a member from the server.
-    pub fn remove_member(&mut self, member_id: String) {
-        self.member_ids.retain(|id| id != &member_id);
+    pub fn remove_member(&mut self, member_id: &str) {
+        self.member_ids.retain(|id| id != member_id);
     }
 
     /// Add a computer to the server.
@@ -136,8 +141,8 @@ impl Server {
     }
 
     /// Remove a computer from the server.
-    pub fn remove_computer(&mut self, computer_id: String) {
-        self.computer_ids.retain(|id| id != &computer_id);
+    pub fn remove_computer(&mut self, computer_id: &str) {
+        self.computer_ids.retain(|id| id != computer_id);
     }
 
     /// Check if an agent is in the server.

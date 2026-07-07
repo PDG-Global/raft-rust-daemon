@@ -100,7 +100,7 @@ impl BuiltInRuntime {
     }
 
     /// Initialize the runtime.
-    pub async fn initialize(&mut self, _config: RuntimeConfig) -> Result<()> {
+    pub fn initialize(&mut self, _config: RuntimeConfig) -> Result<()> {
         // Already initialized
         self.state = RuntimeStatus::Ready;
         Ok(())
@@ -140,7 +140,8 @@ impl BuiltInRuntime {
         }
 
         // Wait for response
-        let timeout_duration = Duration::from_secs(message.metadata.timeout as u64 / 1000);
+        let timeout_ms = message.metadata.timeout.max(0) as u64;
+        let timeout_duration = Duration::from_millis(timeout_ms);
         let response = timeout(timeout_duration, async {
             if let Some(ref mut stdout) = self.stdout {
                 let mut buf = Vec::new();

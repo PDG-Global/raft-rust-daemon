@@ -27,6 +27,12 @@ build_errors.txt
 build_log.txt
 raft-daemon-state.json
 
+# Release artifacts (build-release.sh output)
+/dist/
+
+# Local-only release build script (not for the public repo)
+/build-release.sh
+
 # Coverage / profiling output
 *.profraw
 *.profdata
