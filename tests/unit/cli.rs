@@ -1,0 +1,71 @@
+//! Unit tests for CLI.
+
+use clap::Parser;
+
+use raft_daemon::cli::args::CliArgs;
+use raft_daemon::cli::commands::*;
+
+#[test]
+fn test_cli_args_parse() {
+    let args = CliArgs::parse_from(vec!["raft-daemon", "--profile", "test", "start"]);
+    assert_eq!(args.profile, "test");
+}
+
+#[test]
+fn test_cli_command_daemon_start() {
+    let command = CliCommand::Daemon {
+        command: DaemonCommand::Start {
+            server_url: "wss://test".to_string(),
+            api_key: "key-1".to_string(),
+            profile: "test".to_string(),
+        },
+    };
+
+    match command {
+        CliCommand::Daemon {
+            command:
+                DaemonCommand::Start {
+                    server_url,
+                    api_key,
+                    profile,
+                },
+        } => {
+            assert_eq!(server_url, "wss://test");
+            assert_eq!(api_key, "key-1");
+            assert_eq!(profile, "test");
+        }
+        _ => panic!("Expected Daemon::Start"),
+    }
+}
+
+#[test]
+fn test_cli_command_agent_list() {
+    let command = CliCommand::Agent {
+        command: AgentCommand::List,
+    };
+
+    match command {
+        CliCommand::Agent {
+            command: AgentCommand::List,
+        } => {}
+        _ => panic!("Expected Agent::List"),
+    }
+}
+
+#[test]
+fn test_cli_command_server_create() {
+    let command = CliCommand::Server {
+        command: ServerCommand::Create {
+            name: "Test Server".to_string(),
+        },
+    };
+
+    match command {
+        CliCommand::Server {
+            command: ServerCommand::Create { name },
+        } => {
+            assert_eq!(name, "Test Server");
+        }
+        _ => panic!("Expected Server::Create"),
+    }
+}

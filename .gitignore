@@ -1,0 +1,38 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+*.pdb
+
+# Cargo lockfile is kept for the binary crate; remove the next line to ignore it
+# (binaries should commit Cargo.lock; libraries may choose to ignore it)
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Local state and logs
+*.log
+build_errors.txt
+build_log.txt
+raft-daemon-state.json
+
+# Coverage / profiling output
+*.profraw
+*.profdata
+coverage/
+tarpaulin-report.html
+cobertura.xml
+
+# OS cruft
+Thumbs.db
