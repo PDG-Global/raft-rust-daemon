@@ -19,6 +19,7 @@
 use std::io::IsTerminal;
 use std::process::Stdio;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -41,6 +42,7 @@ use crate::daemon::agent::{
 use crate::daemon::paths;
 use crate::daemon::pidfile;
 use crate::daemon::state::{DaemonState, StateMgr};
+use crate::daemon::update::{self, UpdateOptions};
 use crate::models::RuntimeConfig;
 
 /// Reconnect backoff ceiling.
@@ -76,6 +78,8 @@ pub struct DaemonOptions {
     pub profile: String,
     /// Run in the foreground (true) or spawn a detached child (false).
     pub foreground: bool,
+    /// Self-update behaviour.
+    pub update: UpdateOptions,
 }
 
 impl DaemonOptions {
@@ -195,6 +199,26 @@ fn spawn_background(opts: &DaemonOptions) -> Result<u32> {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+
+    if opts.update.enabled {
+        std_cmd.arg("--auto-update");
+    }
+    if let Some(hours) = opts.update.check_interval.as_secs().checked_div(3600) {
+        if hours != 24 {
+            std_cmd.arg("--auto-update-interval").arg(hours.to_string());
+        }
+    }
+    if let Some(start) = opts.update.quiet_hours_start {
+        std_cmd
+            .arg("--auto-update-quiet-hours-start")
+            .arg(start.to_string());
+    }
+    if let Some(end) = opts.update.quiet_hours_end {
+        std_cmd
+            .arg("--auto-update-quiet-hours-end")
+            .arg(end.to_string());
+    }
+
     detach_process(&mut std_cmd);
 
     let mut cmd = TokioCommand::from(std_cmd);
@@ -341,15 +365,31 @@ async fn run_foreground(opts: DaemonOptions) -> Result<()> {
         warn!(error = %err, "failed to create agents dir; agent starts will fail");
     }
 
-    // Per-connection registry of running agents. Lives for the lifetime of
-    // the process; cleared entries' RustyCLI child processes are awaited /
-    // dropped via `agent:stop`.
     let agents: Arc<AgentProcessRegistry> = Arc::new(AgentProcessRegistry::new());
+    let active_turns: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     spawn_signal_handler(shutdown_tx);
 
-    let loop_result = run_event_loop(opts.clone(), state, agents, opts.api_key.clone(), shutdown_rx).await;
+    let current_exe = std::env::current_exe().unwrap_or_default();
+    let update_checker = tokio::spawn(update::spawn_update_checker(
+        opts.update.clone(),
+        active_turns.clone(),
+        current_exe,
+    ));
+
+    let loop_result = run_event_loop(
+        opts.clone(),
+        state,
+        agents.clone(),
+        active_turns.clone(),
+        opts.api_key.clone(),
+        shutdown_rx,
+    )
+    .await;
+
+    update_checker.abort();
+    let _ = update_checker.await;
 
     // Always clean up the PID file on exit, even on error.
     pidfile::remove_pid(&pid_path);
@@ -400,6 +440,7 @@ async fn run_event_loop(
     opts: DaemonOptions,
     state: Arc<dyn StateMgr>,
     agents: Arc<AgentProcessRegistry>,
+    active_turns: Arc<AtomicUsize>,
     api_key: String,
     mut shutdown_rx: watch::Receiver<bool>,
 ) -> Result<()> {
@@ -427,6 +468,7 @@ async fn run_event_loop(
                     ws,
                     state.clone(),
                     agents.clone(),
+                    active_turns.clone(),
                     opts.server_url.clone(),
                     api_key.clone(),
                     opts.profile.clone(),
@@ -514,10 +556,12 @@ enum ConnectionOutcome {
 
 /// Drive a single connection: spawn the writer + ping tasks, then read
 /// inbound messages until shutdown or until the socket closes.
+#[allow(clippy::too_many_arguments)]
 async fn drive_connection(
     ws: WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
     state: Arc<dyn StateMgr>,
     agents: Arc<AgentProcessRegistry>,
+    active_turns: Arc<AtomicUsize>,
     server_url: String,
     api_key: String,
     profile: String,
@@ -581,6 +625,7 @@ async fn drive_connection(
                             &outbound_tx,
                             &state,
                             &agents,
+                            &active_turns,
                             &server_url,
                             &api_key,
                             &profile,
@@ -672,11 +717,13 @@ fn spawn_pinger(tx: mpsc::Sender<WsMessage>) -> tokio::task::JoinHandle<()> {
 /// # Errors
 ///
 /// Returns an error if the response cannot be sent over the channel.
+#[allow(clippy::too_many_arguments)]
 async fn handle_server_message(
     text: &str,
     outbound: &mpsc::Sender<WsMessage>,
     state: &Arc<dyn StateMgr>,
     agents: &Arc<AgentProcessRegistry>,
+    active_turns: &Arc<AtomicUsize>,
     server_url: &str,
     api_key: &str,
     profile: &str,
@@ -789,14 +836,17 @@ async fn handle_server_message(
             }
 
             // Spawn the turn in the background so the read loop isn't blocked.
-            // RustyCLI invocations can take seconds-to-minutes.
+            // RustyCLI invocations can take seconds-to-minutes. The active-turns
+            // counter lets the auto-updater wait until the daemon is idle.
             let agents_clone = Arc::clone(agents);
             let outbound_clone = outbound.clone();
             let server_url_clone = server_url.to_string();
             let launch_id_clone = launch_id.clone();
             let agent_id_for_task = agent_id.clone();
             let delivery_clone = value.clone();
+            let active_turns_clone = Arc::clone(active_turns);
             tokio::spawn(async move {
+                active_turns_clone.fetch_add(1, Ordering::Relaxed);
                 run_agent_turn(
                     &agents_clone,
                     &agent_id_for_task,
@@ -806,6 +856,7 @@ async fn handle_server_message(
                     &outbound_clone,
                 )
                 .await;
+                active_turns_clone.fetch_sub(1, Ordering::Relaxed);
             });
         }
 
@@ -2063,6 +2114,7 @@ mod tests {
             api_key: "sk_test".into(),
             profile: "default".into(),
             foreground: false,
+            update: UpdateOptions::default(),
         };
         assert_eq!(
             opts.ws_url().unwrap(),
@@ -2077,6 +2129,7 @@ mod tests {
             api_key: "sk_test".into(),
             profile: "default".into(),
             foreground: false,
+            update: UpdateOptions::default(),
         };
         assert_eq!(
             opts.ws_url().unwrap(),
@@ -2091,6 +2144,7 @@ mod tests {
             api_key: "sk_test".into(),
             profile: "default".into(),
             foreground: false,
+            update: UpdateOptions::default(),
         };
         assert_eq!(
             opts.ws_url().unwrap(),
@@ -2105,6 +2159,7 @@ mod tests {
             api_key: "sk_test".into(),
             profile: "default".into(),
             foreground: false,
+            update: UpdateOptions::default(),
         };
         assert_eq!(
             opts.ws_url().unwrap(),
@@ -2119,6 +2174,7 @@ mod tests {
             api_key: "k".into(),
             profile: "default".into(),
             foreground: false,
+            update: UpdateOptions::default(),
         };
         assert!(opts.ws_url().is_err());
     }

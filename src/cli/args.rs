@@ -5,6 +5,7 @@ use clap::Parser;
 
 /// The Raft daemon CLI.
 #[derive(Debug, Parser)]
+#[allow(clippy::struct_excessive_bools)]
 #[command(name = "raft-daemon")]
 #[command(author = "Raft Contributors")]
 #[command(version = "0.1.0")]
@@ -20,7 +21,7 @@ It handles:
 - Workspace management
 
 Usage:
-  raft-daemon start --server-url <url> --api-key <key>
+  raft-daemon --server-url <url> --api-key <key> start
   raft-daemon stop
   raft-daemon status
 ")]
@@ -54,6 +55,29 @@ pub struct CliArgs {
     /// background child.
     #[arg(long)]
     pub foreground: bool,
+
+    /// Enable automatic self-update checks.
+    ///
+    /// When enabled, the daemon periodically checks GitHub releases and, if a
+    /// newer version is available, updates and restarts while idle and during
+    /// configured quiet hours.
+    #[arg(long)]
+    pub auto_update: bool,
+
+    /// Hours between automatic update checks.
+    #[arg(long, default_value = "24")]
+    pub auto_update_interval: u64,
+
+    /// Start of the quiet-hours window for auto-updates (HH:MM).
+    ///
+    /// Updates are only applied within this window. If not set, any time is
+    /// allowed.
+    #[arg(long)]
+    pub auto_update_quiet_hours_start: Option<String>,
+
+    /// End of the quiet-hours window for auto-updates (HH:MM).
+    #[arg(long)]
+    pub auto_update_quiet_hours_end: Option<String>,
 
     /// The command to run.
     #[arg(trailing_var_arg = true)]
@@ -115,6 +139,21 @@ impl CliArgs {
     /// the command tail explicitly.
     pub fn is_foreground(&self) -> bool {
         self.foreground || self.command.iter().any(|c| c == "--foreground")
+    }
+
+    /// Build self-update options from CLI flags.
+    pub fn update_options(&self) -> crate::daemon::update::UpdateOptions {
+        use chrono::NaiveTime;
+        use std::time::Duration;
+        let parse_time = |s: &Option<String>| -> Option<NaiveTime> {
+            s.as_ref().and_then(|t| NaiveTime::parse_from_str(t, "%H:%M").ok())
+        };
+        crate::daemon::update::UpdateOptions {
+            enabled: self.auto_update,
+            check_interval: Duration::from_secs(self.auto_update_interval * 3600),
+            quiet_hours_start: parse_time(&self.auto_update_quiet_hours_start),
+            quiet_hours_end: parse_time(&self.auto_update_quiet_hours_end),
+        }
     }
 
     /// Get the command arguments.

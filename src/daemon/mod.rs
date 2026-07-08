@@ -35,6 +35,7 @@ pub mod server;
 pub mod state;
 pub mod task;
 pub mod trace;
+pub mod update;
 pub mod workspace;
 
 pub use workspace::*;

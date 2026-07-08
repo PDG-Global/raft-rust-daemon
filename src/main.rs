@@ -36,6 +36,7 @@ async fn main() -> Result<()> {
                     api_key: args.api_key()?,
                     profile: args.profile(),
                     foreground: args.is_foreground(),
+                    update: args.update_options(),
                 },
             };
             cli::commands::execute_command(&command).await?;

@@ -2380,6 +2380,7 @@ dependencies = [
  "ring",
  "rustls",
  "rusty-cli",
+ "semver",
  "serde",
  "serde_json",
  "serde_yaml",

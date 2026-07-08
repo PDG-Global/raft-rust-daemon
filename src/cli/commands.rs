@@ -4,6 +4,7 @@ use anyhow::Result;
 use tracing::info;
 
 use crate::daemon::runner::{self, DaemonOptions, StartOutcome, StatusReport};
+use crate::daemon::update::UpdateOptions;
 
 /// Mask a secret for display, showing only the first and last few characters.
 ///
@@ -92,6 +93,9 @@ pub enum DaemonCommand {
         /// supervisor).
         #[arg(long)]
         foreground: bool,
+        /// Self-update options.
+        #[arg(skip)]
+        update: UpdateOptions,
     },
     /// Stop the daemon.
     Stop {
@@ -454,12 +458,14 @@ pub async fn execute_command(command: &CliCommand) -> Result<()> {
                 api_key,
                 profile,
                 foreground,
+                update,
             } => {
                 let opts = DaemonOptions {
                     server_url: server_url.clone(),
                     api_key: api_key.clone(),
                     profile: profile.clone(),
                     foreground: *foreground,
+                    update: update.clone(),
                 };
                 match runner::start(opts).await? {
                     StartOutcome::Spawned(pid) => {

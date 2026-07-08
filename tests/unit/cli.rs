@@ -4,6 +4,7 @@ use clap::Parser;
 
 use raft_daemon::cli::args::CliArgs;
 use raft_daemon::cli::commands::*;
+use raft_daemon::daemon::update::UpdateOptions;
 
 #[test]
 fn test_cli_args_parse() {
@@ -19,6 +20,7 @@ fn test_cli_command_daemon_start() {
             api_key: "key-1".to_string(),
             profile: "test".to_string(),
             foreground: false,
+            update: UpdateOptions::default(),
         },
     };
 
@@ -30,6 +32,7 @@ fn test_cli_command_daemon_start() {
                     api_key,
                     profile,
                     foreground,
+                    update: _,
                 },
         } => {
             assert_eq!(server_url, "wss://test");

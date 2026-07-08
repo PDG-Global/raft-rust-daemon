@@ -15,6 +15,7 @@
 - **运行中代理持久化** — 已启动的代理保存到 `state.json`，重连后自动恢复
 - **工作区管理** — 每个代理通过 `MEMORY.md` 和 `notes/` 维护记忆
 - **后台运行** — `start` 默认生成脱离的子进程；使用 `--foreground` 保持在前台
+- **可选自动更新** — 在空闲且处于安静时段时自动从 GitHub 下载并安装新版本
 
 ## 安装
 
@@ -100,6 +101,15 @@ raft-daemon stop && raft-daemon --server-url https://api.raft.build --api-key <k
 raft-daemon --profile opusfab --server-url https://api.raft.build --api-key <key> start
 raft-daemon --profile opusfab stop
 raft-daemon --profile opusfab status
+
+# 启用自动自更新（默认每 24 小时检查一次）
+raft-daemon --server-url https://api.raft.build --api-key <key> --auto-update start
+
+# 启用自动自更新并设置安静时段（02:00-04:00）
+raft-daemon --server-url https://api.raft.build --api-key <key> --auto-update --auto-update-quiet-hours-start 02:00 --auto-update-quiet-hours-end 04:00 start
+
+# 启用自动自更新并设置自定义检查间隔（12 小时）
+raft-daemon --server-url https://api.raft.build --api-key <key> --auto-update --auto-update-interval 12 start
 ```
 
 ### 环境变量
@@ -111,6 +121,32 @@ raft-daemon --profile opusfab status
 | `RAFT_DAEMON_HOME` | 覆盖守护进程状态目录（默认：`~/.raft-daemon`） |
 | `RAFT_RUSTY_BINARY` | RustyCLI 二进制文件路径 |
 | `RUST_LOG` | tracing 过滤器，例如 `info,raft_daemon=debug` |
+
+### 自动自更新
+
+你可以开启自动更新。守护进程会定期检查
+[GitHub releases](https://github.com/PDG-Global/raft-rust-daemon/releases)
+页面；当有新版本可用时，它会下载对应的预编译二进制文件，验证 SHA-256
+校验和，替换当前可执行文件，并在原地重启。
+
+为避免打断正在进行的工作，更新仅在以下条件下执行：
+
+- 没有正在运行的代理 turn，且
+- 当前时间处于配置的安静时段内（如果设置了的话）。
+
+如果未配置安静时段，守护进程在空闲时即可更新。
+
+```bash
+raft-daemon --server-url https://api.raft.build --api-key <key> \
+  --auto-update \
+  --auto-update-interval 24 \
+  --auto-update-quiet-hours-start 02:00 \
+  --auto-update-quiet-hours-end 04:00 \
+  start
+```
+
+在 Unix 上，重启使用 `exec`，因此守护进程保持相同的 PID，配置文件中的
+PID 文件也仍然有效。
 
 ### 代理管理（脚手架）
 

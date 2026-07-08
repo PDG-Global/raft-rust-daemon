@@ -17,6 +17,7 @@ Read this in other languages: [简体中文](README.zh-CN.md)
 - **Running-agent persistence** — started agents are saved to `state.json` and restored on reconnect
 - **Workspace management** — per-agent memory via `MEMORY.md` and `notes/`
 - **Background operation** — `start` spawns a detached child by default; use `--foreground` to keep it in the terminal
+- **Optional self-update** — automatically download and install new releases from GitHub while idle and during quiet hours
 
 ## Installation
 
@@ -102,6 +103,15 @@ raft-daemon stop && raft-daemon --server-url https://api.raft.build --api-key <k
 raft-daemon --profile opusfab --server-url https://api.raft.build --api-key <key> start
 raft-daemon --profile opusfab stop
 raft-daemon --profile opusfab status
+
+# Enable automatic self-update (checks every 24 hours by default)
+raft-daemon --server-url https://api.raft.build --api-key <key> --auto-update start
+
+# Enable automatic self-update with custom quiet hours (02:00-04:00)
+raft-daemon --server-url https://api.raft.build --api-key <key> --auto-update --auto-update-quiet-hours-start 02:00 --auto-update-quiet-hours-end 04:00 start
+
+# Enable automatic self-update with a custom check interval (12 hours)
+raft-daemon --server-url https://api.raft.build --api-key <key> --auto-update --auto-update-interval 12 start
 ```
 
 ### Environment variables
@@ -113,6 +123,33 @@ raft-daemon --profile opusfab status
 | `RAFT_DAEMON_HOME` | Override the daemon state directory (`~/.raft-daemon`) |
 | `RAFT_RUSTY_BINARY` | Path to the RustyCLI binary |
 | `RUST_LOG` | tracing filter, e.g. `info,raft_daemon=debug` |
+
+### Automatic self-update
+
+You can opt in to automatic updates. The daemon will periodically check the
+[GitHub releases](https://github.com/PDG-Global/raft-rust-daemon/releases) page;
+when a newer version is available it downloads the matching prebuilt binary,
+verifies the SHA-256 checksum, replaces the current executable, and restarts
+in place.
+
+To avoid interrupting active work, updates only happen when:
+
+- No agent turn is currently running, and
+- The current time is inside the configured quiet-hours window (if any).
+
+If quiet hours are not configured, the daemon may update whenever it is idle.
+
+```bash
+raft-daemon --server-url https://api.raft.build --api-key <key> \
+  --auto-update \
+  --auto-update-interval 24 \
+  --auto-update-quiet-hours-start 02:00 \
+  --auto-update-quiet-hours-end 04:00 \
+  start
+```
+
+The restart uses `exec` on Unix, so the daemon keeps the same PID and the
+profile's PID file remains valid.
 
 ### Agent management (scaffolding)
 

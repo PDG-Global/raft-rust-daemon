@@ -85,6 +85,7 @@ dotenvy = "0.15"
 clap = { version = "4", features = ["derive", "env", "unicode"] }
 colored = "2"
 indicatif = "0.18"
+semver = "1"
 notify = { version = "8", features = ["macos_kqueue"] }
 notify-debouncer-full = { version = "0.3" }
 whoami = "1"
