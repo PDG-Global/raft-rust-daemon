@@ -38,6 +38,10 @@ use crate::daemon::paths;
 pub struct AgentProcess {
     /// Raft agent ID (`ag_…`).
     pub agent_id: String,
+    /// Display name from the server's `agent:start` config.
+    pub name: String,
+    /// Role/description from the server's `agent:start` config.
+    pub description: String,
     /// Runtime ID we advertised (always `builtin` for this port — backed by
     /// RustyCLI).
     pub runtime: String,
@@ -108,6 +112,17 @@ impl AgentProcess {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
+        let name = config
+            .get("displayName")
+            .or_else(|| config.get("name"))
+            .and_then(|v| v.as_str())
+            .unwrap_or(agent_id)
+            .to_string();
+        let description = config
+            .get("description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("No role defined yet.")
+            .to_string();
         let workspace = workspace_for(agent_id, home);
 
         // LLM provider block: `config.provider.{providerId, apiKey, baseUrl}`.
@@ -149,8 +164,17 @@ impl AgentProcess {
         std::fs::create_dir_all(&workspace)
             .with_context(|| format!("creating workspace {}", workspace.display()))?;
 
+        // Set up the agent's memory index and notes directory. If the user has
+        // an existing slock/raft agent home at ~/.slock/agents/<id>, migrate
+        // MEMORY.md and notes so the agent keeps its identity across the Rust
+        // port. Otherwise seed a minimal initial MEMORY.md from the agent name
+        // and description sent by the server.
+        setup_agent_memory(agent_id, &name, &description, &workspace)?;
+
         Ok(Self {
             agent_id: agent_id.to_string(),
+            name,
+            description,
             runtime,
             model,
             workspace,
@@ -457,6 +481,106 @@ pub fn resolve_llm_credentials(
     out
 }
 
+/// Set up the agent's memory workspace: ensure `MEMORY.md` exists and a
+/// `notes/` directory is present. If the user previously ran the npm daemon,
+/// migrate `MEMORY.md` and notes from `~/.slock/agents/<agent_id>/` so the
+/// agent keeps its memory across the Rust port. Otherwise seed a minimal
+/// initial `MEMORY.md` from the agent name and description sent by the
+/// server.
+///
+/// # Errors
+///
+/// Returns an error if the workspace, notes directory, or memory file cannot
+/// be created, or if copying from the legacy slock location fails.
+pub fn setup_agent_memory(
+    agent_id: &str,
+    name: &str,
+    description: &str,
+    workspace: &Path,
+) -> Result<()> {
+    let memory_path = workspace.join("MEMORY.md");
+    let notes_dir = workspace.join("notes");
+
+    std::fs::create_dir_all(&notes_dir)
+        .with_context(|| format!("creating notes dir {}", notes_dir.display()))?;
+
+    if !memory_path.exists() {
+        // Try to migrate from the npm daemon's legacy location.
+        if let Some(user_home) = user_home_dir_from_env() {
+            let legacy_dir = user_home.join(".slock").join("agents").join(agent_id);
+            let legacy_memory = legacy_dir.join("MEMORY.md");
+            if legacy_memory.exists() {
+                info!(
+                    agent_id = %agent_id,
+                    legacy = %legacy_memory.display(),
+                    dest = %memory_path.display(),
+                    "migrating MEMORY.md from legacy slock location"
+                );
+                std::fs::copy(&legacy_memory, &memory_path).with_context(|| {
+                    format!(
+                        "copying {} to {}",
+                        legacy_memory.display(),
+                        memory_path.display()
+                    )
+                })?;
+
+                let legacy_notes = legacy_dir.join("notes");
+                if legacy_notes.is_dir() {
+                    migrate_notes_dir(&legacy_notes, &notes_dir)?;
+                }
+            }
+        }
+
+        if !memory_path.exists() {
+            let initial = build_initial_memory_md(name, description);
+            std::fs::write(&memory_path, initial)
+                .with_context(|| format!("writing initial MEMORY.md {}", memory_path.display()))?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Best-effort migration of the legacy `notes/` directory into the new agent
+/// workspace. Files are copied only if the destination doesn't already exist.
+fn migrate_notes_dir(src: &Path, dst: &Path) -> Result<()> {
+    for entry in std::fs::read_dir(src)
+        .with_context(|| format!("reading legacy notes dir {}", src.display()))?
+    {
+        let entry = entry?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        if src_path.is_file() && !dst_path.exists() {
+            std::fs::copy(&src_path, &dst_path)
+                .with_context(|| format!("copying note {} to {}", src_path.display(), dst_path.display()))?;
+        }
+    }
+    Ok(())
+}
+
+/// Build a minimal initial `MEMORY.md` matching the npm daemon's format.
+fn build_initial_memory_md(name: &str, description: &str) -> String {
+    format!(
+        "# {name}\n\n## Role\n{description}\n\n## Key Knowledge\n- No notes yet.\n\n## Active Context\n- First startup.\n"
+    )
+}
+
+/// Resolve the user's home directory from `$HOME` (Unix) or `$USERPROFILE`
+/// (Windows). This intentionally mirrors the logic in `crate::daemon::paths`
+/// without exposing the private helper.
+fn user_home_dir_from_env() -> Option<PathBuf> {
+    #[cfg(unix)]
+    {
+        std::env::var_os("HOME").filter(|h| !h.is_empty()).map(PathBuf::from)
+    }
+    #[cfg(not(unix))]
+    {
+        std::env::var_os("USERPROFILE")
+            .filter(|h| !h.is_empty())
+            .map(PathBuf::from)
+    }
+}
+
 /// Resolve the per-agent workspace directory.
 ///
 /// Layout: `<daemon_home>/agents/<agent_id>/`. The agent_id is already
@@ -698,7 +822,71 @@ mod tests {
         let p = AgentProcess::from_start("ag_x", &config, None, tmp.path()).unwrap();
         assert_eq!(p.runtime, "builtin");
         assert!(p.model.is_empty());
+        assert_eq!(p.name, "ag_x");
+        assert_eq!(p.description, "No role defined yet.");
         assert!(p.launch_id.is_none());
+    }
+
+    #[test]
+    fn from_start_extracts_name_and_description() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = serde_json::json!({
+            "name": "Alice",
+            "displayName": "Alice the Coder",
+            "description": "Full-stack assistant.",
+        });
+        let p = AgentProcess::from_start("ag_alice", &config, None, tmp.path()).unwrap();
+        // displayName takes precedence over name.
+        assert_eq!(p.name, "Alice the Coder");
+        assert_eq!(p.description, "Full-stack assistant.");
+    }
+
+    #[test]
+    fn from_start_creates_initial_memory_md() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = serde_json::json!({
+            "name": "Cindy",
+            "description": "Onboarding lead.",
+        });
+        let p = AgentProcess::from_start("ag_cindy", &config, None, tmp.path()).unwrap();
+        let memory_path = p.workspace.join("MEMORY.md");
+        assert!(memory_path.exists());
+        let contents = std::fs::read_to_string(memory_path).unwrap();
+        assert!(contents.contains("# Cindy"));
+        assert!(contents.contains("Onboarding lead."));
+        assert!(p.workspace.join("notes").is_dir());
+    }
+
+    #[test]
+    fn from_start_migrates_legacy_memory_md() {
+        // Set HOME to a temp dir so the legacy ~/.slock path is scoped to it.
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let prior = std::env::var_os("HOME");
+        // Safety: tests in this module are run in-process; we restore HOME below.
+        unsafe { std::env::set_var("HOME", &home); }
+
+        let agent_id = "ag_migrator";
+        let legacy_agent = home.join(".slock").join("agents").join(agent_id);
+        std::fs::create_dir_all(&legacy_agent).unwrap();
+        std::fs::write(legacy_agent.join("MEMORY.md"), "# Legacy memory\n").unwrap();
+        std::fs::create_dir_all(legacy_agent.join("notes")).unwrap();
+        std::fs::write(legacy_agent.join("notes").join("legacy-note.md"), "note\n").unwrap();
+
+        let daemon_home = tmp.path().join("raft-daemon");
+        let p = AgentProcess::from_start(agent_id, &serde_json::json!({}), None, &daemon_home).unwrap();
+
+        // Restore HOME before asserting so a panic doesn't leak the override.
+        unsafe {
+            match prior {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+
+        assert_eq!(std::fs::read_to_string(p.workspace.join("MEMORY.md")).unwrap(), "# Legacy memory\n");
+        assert!(p.workspace.join("notes").join("legacy-note.md").exists());
     }
 
     #[test]
@@ -721,6 +909,8 @@ mod tests {
 
         let p = AgentProcess {
             agent_id: "ag_a".into(),
+            name: "Agent A".into(),
+            description: "A test agent".into(),
             runtime: "builtin".into(),
             model: "sonnet".into(),
             workspace: tmp.path().join("ag_a"),

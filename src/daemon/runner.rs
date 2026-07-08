@@ -1074,7 +1074,7 @@ async fn send_agent_activity(
 /// Returns `None` when the delivery should be ignored (self-echo, bot chatter
 /// in a public channel, etc.). The reason is logged at debug level so
 /// operators can audit the decision.
-fn prepare_delivery_prompt(agent_id: &str, delivery: &serde_json::Value) -> Option<String> {
+fn prepare_delivery_prompt(agent_id: &str, workspace: &std::path::Path, delivery: &serde_json::Value) -> Option<String> {
     let msg = delivery.get("message")?;
     let content = msg
         .get("content")
@@ -1133,8 +1133,42 @@ fn prepare_delivery_prompt(agent_id: &str, delivery: &serde_json::Value) -> Opti
         .and_then(|v| v.as_str())
         .unwrap_or("unknown");
 
+    // Read the agent's memory index. Keep the prompt reasonably bounded by
+    // truncating very large MEMORY.md files; the agent can read additional
+    // notes on demand via the runtime if needed.
+    let memory_path = workspace.join("MEMORY.md");
+    let memory_block = match std::fs::read_to_string(&memory_path) {
+        Ok(text) => {
+            const MAX_MEMORY_LEN: usize = 8_000;
+            if text.len() > MAX_MEMORY_LEN {
+                format!(
+                    "## MEMORY.md (truncated)\n{}\n\n...(truncated; full file is at {})",
+                    &text[..MAX_MEMORY_LEN],
+                    memory_path.display()
+                )
+            } else {
+                format!("## MEMORY.md\n{text}")
+            }
+        }
+        Err(err) => {
+            tracing::debug!(
+                agent_id = %agent_id,
+                path = %memory_path.display(),
+                error = %err,
+                "no MEMORY.md found for agent; using minimal context"
+            );
+            String::new()
+        }
+    };
+
+    let context_header = if memory_block.is_empty() {
+        "Below is your memory/context (none yet).\n".to_string()
+    } else {
+        format!("Below is your memory/context. Read it first, then handle the message.\n\n{memory_block}\n")
+    };
+
     Some(format!(
-        "New message received:\n\n[target={target} msg={msg_id} time={time} type={sender_type}] @{sender_name}: {content}\n\nRespond as appropriate. Only reply if you are directly addressed, this is a DM, or you have an explicit task. Complete all your work before stopping."
+        "{context_header}New message received:\n\n[target={target} msg={msg_id} time={time} type={sender_type}] @{sender_name}: {content}\n\nRespond as appropriate. Only reply if you are directly addressed, this is a DM, or you have an explicit task. Complete all your work before stopping."
     ))
 }
 
@@ -1171,7 +1205,7 @@ async fn run_agent_turn(
     // Decide whether to respond and build a prompt that mirrors the npm
     // daemon's stdin format (target, sender, context) plus an explicit
     // instruction to only reply when addressed.
-    let Some(prompt) = prepare_delivery_prompt(agent_id, delivery) else {
+    let Some(prompt) = prepare_delivery_prompt(agent_id, &process.workspace, delivery) else {
         return;
     };
 
@@ -1827,6 +1861,7 @@ mod tests {
 
     #[test]
     fn prepare_delivery_prompt_skips_self_echo() {
+        let tmp = tempfile::tempdir().unwrap();
         let agent_id = "ag_123";
         let delivery = serde_json::json!({
             "message": {
@@ -1837,11 +1872,12 @@ mod tests {
                 "channel_name": "general",
             }
         });
-        assert!(prepare_delivery_prompt(agent_id, &delivery).is_none());
+        assert!(prepare_delivery_prompt(agent_id, tmp.path(), &delivery).is_none());
     }
 
     #[test]
     fn prepare_delivery_prompt_skips_bot_in_public_channel() {
+        let tmp = tempfile::tempdir().unwrap();
         let delivery = serde_json::json!({
             "message": {
                 "content": "hello",
@@ -1852,11 +1888,12 @@ mod tests {
                 "channel_name": "general",
             }
         });
-        assert!(prepare_delivery_prompt("ag_123", &delivery).is_none());
+        assert!(prepare_delivery_prompt("ag_123", tmp.path(), &delivery).is_none());
     }
 
     #[test]
     fn prepare_delivery_prompt_allows_bot_in_dm() {
+        let tmp = tempfile::tempdir().unwrap();
         let delivery = serde_json::json!({
             "message": {
                 "content": "hello",
@@ -1867,13 +1904,14 @@ mod tests {
                 "sender_name": "other-bot",
             }
         });
-        let prompt = prepare_delivery_prompt("ag_123", &delivery).unwrap();
+        let prompt = prepare_delivery_prompt("ag_123", tmp.path(), &delivery).unwrap();
         assert!(prompt.contains("hello"));
         assert!(prompt.contains("New message received:"));
     }
 
     #[test]
     fn prepare_delivery_prompt_allows_human_in_channel() {
+        let tmp = tempfile::tempdir().unwrap();
         let delivery = serde_json::json!({
             "message": {
                 "content": "can you help?",
@@ -1884,7 +1922,7 @@ mod tests {
                 "channel_name": "general",
             }
         });
-        let prompt = prepare_delivery_prompt("ag_123", &delivery).unwrap();
+        let prompt = prepare_delivery_prompt("ag_123", tmp.path(), &delivery).unwrap();
         assert!(prompt.contains("can you help?"));
         assert!(prompt.contains("@alice"));
         assert!(prompt.contains("#general"));
@@ -1893,6 +1931,7 @@ mod tests {
 
     #[test]
     fn prepare_delivery_prompt_formats_payload_like_npm() {
+        let tmp = tempfile::tempdir().unwrap();
         let delivery = serde_json::json!({
             "message": {
                 "message_id": "msg_abc",
@@ -1905,9 +1944,28 @@ mod tests {
                 "channel_name": "dev",
             }
         });
-        let prompt = prepare_delivery_prompt("ag_123", &delivery).unwrap();
+        let prompt = prepare_delivery_prompt("ag_123", tmp.path(), &delivery).unwrap();
         assert!(prompt.contains("[target=#dev msg=msg_abc"));
         assert!(prompt.contains("type=human] @bob: fix the bug"));
         assert!(prompt.contains("Respond as appropriate"));
+    }
+
+    #[test]
+    fn prepare_delivery_prompt_includes_memory_md() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("MEMORY.md"), "# Project Foo\n\nUse Rust.").unwrap();
+        let delivery = serde_json::json!({
+            "message": {
+                "content": "what stack?",
+                "sender_id": "user_1",
+                "sender_type": "human",
+                "sender_name": "bob",
+                "channel_type": "channel",
+                "channel_name": "dev",
+            }
+        });
+        let prompt = prepare_delivery_prompt("ag_123", tmp.path(), &delivery).unwrap();
+        assert!(prompt.contains("# Project Foo"));
+        assert!(prompt.contains("what stack?"));
     }
 }

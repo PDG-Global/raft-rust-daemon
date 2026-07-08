@@ -78,6 +78,10 @@ cargo build --release --target aarch64-unknown-linux-gnu
 
 - The daemon backgrounds itself by default with `setsid()` unless `--foreground` is passed.
 - Home directory defaults to `~/.raft-daemon/` and can be overridden with `RAFT_DAEMON_HOME`.
+- Per-agent workspace lives at `~/.raft-daemon/agents/<agent_id>/`.
+- `MEMORY.md` and `notes/` are created in the agent workspace on `agent:start`.
+- If a legacy npm daemon home exists at `~/.slock/agents/<agent_id>/`, `MEMORY.md` and `notes/` are migrated into the new workspace on first start.
+- `MEMORY.md` is injected into every RustyCLI prompt (truncated at 8 KB), so the agent retains context across turns.
 - The WebSocket path connects to `<server_url>/daemon/connect?key=<api_key>`.
 - `ring` CryptoProvider is installed explicitly at startup to avoid rustls panics.
 - Provider config is extracted from multiple shapes/casings (`config.provider`, `config.runtimeConfig.provider`, snake_case and camelCase fields, model-prefix inference).
@@ -89,7 +93,8 @@ cargo build --release --target aarch64-unknown-linux-gnu
 
 - The macOS universal binary produced by `build-release.sh` can fail codesign with `A timestamp was expected but was not found.`, even though the individual `arm64` and `x86_64` binaries sign successfully. Do not ship the universal macOS binary until resolved; ship the two single-arch binaries instead.
 - Proxy egress is not fully honored by the HTTP client; `tokio-tungstenite` does honor `HTTPS_PROXY`.
-- Each `agent:deliver` spawns a fresh `rusty` process; continuity relies on `--resume <session_id>`.
+- Each `agent:deliver` spawns a fresh `rusty` process; continuity relies on `--resume <session_id>` and the agent workspace files (especially `MEMORY.md`).
+- `agent:deliver` now filters out self-echo and bot messages in public channels, and injects `MEMORY.md` context into the prompt. If the server sends different payload shapes, the debug log of the raw delivery will show them.
 
 ## Testing conventions
 
