@@ -778,10 +778,22 @@ pub async fn run_one_turn(process: &AgentProcess, prompt: &str) -> Result<String
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
-        anyhow::bail!(
-            "rusty exited status={} — stderr: {stderr} — stdout: {stdout}",
-            output.status
+        if stdout.trim().is_empty() {
+            anyhow::bail!(
+                "rusty exited status={} — stderr: {stderr} — stdout: {stdout}",
+                output.status
+            );
+        }
+        // RustyCLI may emit a model response on stdout even when it exits
+        // non-zero due to a follow-up tool/API error. In that case the useful
+        // answer is still in stdout, so return it and log the stderr as a warning.
+        warn!(
+            agent_id = %process.agent_id,
+            status = %output.status,
+            stderr = %stderr,
+            "rusty exited non-zero but produced stdout; using stdout as response"
         );
+        return Ok(stdout.trim().to_string());
     }
 
     let response = String::from_utf8_lossy(&output.stdout).to_string();
