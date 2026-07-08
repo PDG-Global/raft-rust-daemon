@@ -51,6 +51,9 @@ const INITIAL_RECONNECT_BACKOFF: Duration = Duration::from_secs(1);
 const PING_INTERVAL: Duration = Duration::from_secs(30);
 /// Grace period after which a liveness probe forces a reconnect.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
+/// Marker RustyCLI should output when it chooses not to reply. The daemon will
+/// not post this marker (or an empty response) to raft.
+const NO_REPLY_MARKER: &str = "NO_REPLY";
 
 /// Options describing how to start the daemon.
 #[derive(Debug, Clone)]
@@ -1168,7 +1171,7 @@ fn prepare_delivery_prompt(agent_id: &str, workspace: &std::path::Path, delivery
     };
 
     Some(format!(
-        "{context_header}New message received:\n\n[target={target} msg={msg_id} time={time} type={sender_type}] @{sender_name}: {content}\n\nRespond as appropriate. Only reply if you are directly addressed, this is a DM, or you have an explicit task. Complete all your work before stopping."
+        "{context_header}New message received:\n\n[target={target} msg={msg_id} time={time} type={sender_type}] @{sender_name}: {content}\n\nRespond as appropriate. Only reply if you are directly addressed, this is a DM, or you have an explicit task. If you choose not to respond, output exactly `{NO_REPLY_MARKER}` and nothing else. Complete all your work before stopping."
     ))
 }
 
@@ -1217,11 +1220,16 @@ async fn run_agent_turn(
 
     match result {
         Ok(response) => {
-            info!(agent_id = agent_id, response_len = response.len(), "rusty turn completed");
-            tracing::info!(target: "raft_daemon::agent::response", agent_id = agent_id, response = %response);
+            let trimmed = response.trim();
+            info!(agent_id = agent_id, response_len = trimmed.len(), "rusty turn completed");
+            tracing::info!(target: "raft_daemon::agent::response", agent_id = agent_id, response = %trimmed);
 
-            // POST the response to raft so it shows up in chat.
-            post_agent_reply(&process, delivery, server_url, &response).await;
+            if trimmed.is_empty() || trimmed.eq_ignore_ascii_case(NO_REPLY_MARKER) {
+                tracing::debug!(agent_id = %agent_id, "rusty chose not to reply; skipping raft post");
+            } else {
+                // POST the response to raft so it shows up in chat.
+                post_agent_reply(&process, delivery, server_url, trimmed).await;
+            }
 
             if let Err(err) =
                 send_agent_activity(outbound, agent_id, "idle", "Idle", launch_ref, process.next_activity_client_seq()).await
@@ -1927,6 +1935,7 @@ mod tests {
         assert!(prompt.contains("@alice"));
         assert!(prompt.contains("#general"));
         assert!(prompt.contains("Only reply if you are directly addressed"));
+        assert!(prompt.contains("NO_REPLY"));
     }
 
     #[test]
