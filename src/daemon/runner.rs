@@ -929,8 +929,13 @@ async fn handle_server_message(
             let launch_id = value.get("launchId").cloned();
             info!(agent_id = %agent_id, "agent:stop received");
             state.remove_running_agent(&agent_id);
-            if let Err(err) = state.save() {
-                warn!(error = %err, agent_id = %agent_id, "failed to persist agent stop");
+            match state.save() {
+                Ok(()) => {
+                    info!(agent_id = %agent_id, "removed persisted running agent");
+                }
+                Err(err) => {
+                    warn!(error = %err, agent_id = %agent_id, "failed to persist agent stop");
+                }
             }
             if agents.remove(&agent_id).is_some() {
                 info!(agent_id = %agent_id, "removed agent from registry");
@@ -1128,8 +1133,13 @@ async fn start_agent(
             agents.install(process);
 
             state.set_running_agent(&agent_id, value.clone());
-            if let Err(err) = state.save() {
-                warn!(error = %err, agent_id = %agent_id, "failed to persist running agent");
+            match state.save() {
+                Ok(()) => {
+                    info!(agent_id = %agent_id, "persisted running agent");
+                }
+                Err(err) => {
+                    warn!(error = %err, agent_id = %agent_id, "failed to persist running agent");
+                }
             }
 
             let mut session_payload = serde_json::json!({
