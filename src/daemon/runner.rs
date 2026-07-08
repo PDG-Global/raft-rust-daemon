@@ -1077,7 +1077,13 @@ async fn send_agent_activity(
 /// Returns `None` when the delivery should be ignored (self-echo, bot chatter
 /// in a public channel, etc.). The reason is logged at debug level so
 /// operators can audit the decision.
-fn prepare_delivery_prompt(agent_id: &str, workspace: &std::path::Path, delivery: &serde_json::Value) -> Option<String> {
+fn prepare_delivery_prompt(
+    agent_id: &str,
+    name: &str,
+    description: &str,
+    workspace: &std::path::Path,
+    delivery: &serde_json::Value,
+) -> Option<String> {
     let msg = delivery.get("message")?;
     let content = msg
         .get("content")
@@ -1165,9 +1171,9 @@ fn prepare_delivery_prompt(agent_id: &str, workspace: &std::path::Path, delivery
     };
 
     let context_header = if memory_block.is_empty() {
-        "Below is your memory/context (none yet).\n".to_string()
+        format!("You are {name}. {description}\n\nBelow is your memory/context (none yet).\n")
     } else {
-        format!("Below is your memory/context. Read it first, then handle the message.\n\n{memory_block}\n")
+        format!("You are {name}. {description}\n\nBelow is your memory/context. Read it first, then handle the message.\n\n{memory_block}\n")
     };
 
     Some(format!(
@@ -1208,7 +1214,7 @@ async fn run_agent_turn(
     // Decide whether to respond and build a prompt that mirrors the npm
     // daemon's stdin format (target, sender, context) plus an explicit
     // instruction to only reply when addressed.
-    let Some(prompt) = prepare_delivery_prompt(agent_id, &process.workspace, delivery) else {
+    let Some(prompt) = prepare_delivery_prompt(agent_id, &process.name, &process.description, &process.workspace, delivery) else {
         return;
     };
 
@@ -1880,7 +1886,7 @@ mod tests {
                 "channel_name": "general",
             }
         });
-        assert!(prepare_delivery_prompt(agent_id, tmp.path(), &delivery).is_none());
+        assert!(prepare_delivery_prompt(agent_id, "Agent", "A test agent", tmp.path(), &delivery).is_none());
     }
 
     #[test]
@@ -1896,7 +1902,7 @@ mod tests {
                 "channel_name": "general",
             }
         });
-        assert!(prepare_delivery_prompt("ag_123", tmp.path(), &delivery).is_none());
+        assert!(prepare_delivery_prompt("ag_123", "Agent", "A test agent", tmp.path(), &delivery).is_none());
     }
 
     #[test]
@@ -1912,7 +1918,7 @@ mod tests {
                 "sender_name": "other-bot",
             }
         });
-        let prompt = prepare_delivery_prompt("ag_123", tmp.path(), &delivery).unwrap();
+        let prompt = prepare_delivery_prompt("ag_123", "Agent", "A test agent", tmp.path(), &delivery).unwrap();
         assert!(prompt.contains("hello"));
         assert!(prompt.contains("New message received:"));
     }
@@ -1930,7 +1936,7 @@ mod tests {
                 "channel_name": "general",
             }
         });
-        let prompt = prepare_delivery_prompt("ag_123", tmp.path(), &delivery).unwrap();
+        let prompt = prepare_delivery_prompt("ag_123", "Agent", "A test agent", tmp.path(), &delivery).unwrap();
         assert!(prompt.contains("can you help?"));
         assert!(prompt.contains("@alice"));
         assert!(prompt.contains("#general"));
@@ -1953,7 +1959,8 @@ mod tests {
                 "channel_name": "dev",
             }
         });
-        let prompt = prepare_delivery_prompt("ag_123", tmp.path(), &delivery).unwrap();
+        let prompt = prepare_delivery_prompt("ag_123", "Coder", "Fixes bugs", tmp.path(), &delivery).unwrap();
+        assert!(prompt.contains("You are Coder. Fixes bugs"));
         assert!(prompt.contains("[target=#dev msg=msg_abc"));
         assert!(prompt.contains("type=human] @bob: fix the bug"));
         assert!(prompt.contains("Respond as appropriate"));
@@ -1973,7 +1980,7 @@ mod tests {
                 "channel_name": "dev",
             }
         });
-        let prompt = prepare_delivery_prompt("ag_123", tmp.path(), &delivery).unwrap();
+        let prompt = prepare_delivery_prompt("ag_123", "Coder", "Fixes bugs", tmp.path(), &delivery).unwrap();
         assert!(prompt.contains("# Project Foo"));
         assert!(prompt.contains("what stack?"));
     }
