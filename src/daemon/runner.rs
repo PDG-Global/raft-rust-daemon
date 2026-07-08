@@ -249,18 +249,16 @@ fn open_log_writer(profile: &str) -> Result<std::fs::File> {
 }
 
 /// Configure the spawned child to fully detach from the controlling
-/// terminal: new session via `setsid()`, new process group, ignored `SIGHUP`.
+/// terminal: new session via `setsid()`, ignored `SIGHUP`.
 #[cfg(unix)]
 fn detach_process(cmd: &mut std::process::Command) {
     use std::os::unix::process::CommandExt;
 
-    // Place the child in its own process group so terminal signals aimed at
-    // the parent's group don't propagate to it.
-    cmd.process_group(0);
-
     // Safety: `setsid()` is async-signal-safe and is called after fork but
-    // before exec. We ignore its return value because failure (e.g.
-    // EPERM if already a session leader) is non-fatal for our purposes.
+    // before exec. It creates a new session and process group, detaching the
+    // child from the parent's controlling terminal. We deliberately do NOT set
+    // `process_group(0)` here, because making the child a process-group
+    // leader before `setsid()` causes `setsid()` to fail with EPERM.
     unsafe {
         cmd.pre_exec(|| {
             let _ = libc::setsid();
