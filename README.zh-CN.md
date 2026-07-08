@@ -1,37 +1,35 @@
-# Raft Daemon (Rust)
+# Raft Daemon（Rust 版）
 
 [![crates.io](https://img.shields.io/crates/v/raft-daemon.svg)](https://crates.io/crates/raft-daemon)
 [![Documentation](https://docs.rs/raft-daemon/badge.svg)](https://docs.rs/raft-daemon)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-A Rust-native port of the `@botiverse/raft-daemon` npm package for agent lifecycle management.
+`@botiverse/raft-daemon` npm 包的 Rust 原生移植版，用于代理生命周期管理。
 
-Read this in other languages: [简体中文](README.zh-CN.md)
+## 功能
 
-## Features
+- **代理生命周期管理** — 通过 Raft 服务器启动、停止、重启和重置代理
+- **消息投递** — 从 Raft 接收消息并分发给代理
+- **RustyCLI 运行时** — 默认的 `builtin` 运行时由 RustyCLI 驱动
+- **多配置文件支持** — 使用 `--profile` 运行多个相互隔离的守护进程实例
+- **运行中代理持久化** — 已启动的代理保存到 `state.json`，重连后自动恢复
+- **工作区管理** — 每个代理通过 `MEMORY.md` 和 `notes/` 维护记忆
+- **后台运行** — `start` 默认生成脱离的子进程；使用 `--foreground` 保持在前台
 
-- **Agent lifecycle management** — start, stop, restart, and reset agents via the raft server
-- **Message delivery** — receive messages from raft and dispatch them to agents
-- **RustyCLI-backed runtime** — the default `builtin` runtime is powered by RustyCLI
-- **Multi-profile support** — run multiple isolated daemon instances with `--profile`
-- **Running-agent persistence** — started agents are saved to `state.json` and restored on reconnect
-- **Workspace management** — per-agent memory via `MEMORY.md` and `notes/`
-- **Background operation** — `start` spawns a detached child by default; use `--foreground` to keep it in the terminal
+## 安装
 
-## Installation
+### 预编译二进制文件
 
-### Prebuilt binaries
-
-Download the binary for your platform from the [GitHub releases](https://github.com/PDG-Global/raft-rust-daemon/releases) page, make it executable, and place it on your `PATH`.
+从 [GitHub releases](https://github.com/PDG-Global/raft-rust-daemon/releases) 页面下载适合你平台的二进制文件，赋予执行权限并放到 `PATH` 中。
 
 ```bash
-# Example: macOS Apple Silicon
+# 示例：macOS Apple Silicon
 curl -L -o raft-daemon https://github.com/PDG-Global/raft-rust-daemon/releases/latest/download/raft-daemon-macos-arm64
 chmod +x raft-daemon
 sudo mv raft-daemon /usr/local/bin/
 ```
 
-Verify the checksum:
+验证校验和：
 
 ```bash
 shasum -a 256 -c SHA256SUMS.txt
@@ -43,80 +41,80 @@ shasum -a 256 -c SHA256SUMS.txt
 cargo install raft-daemon
 ```
 
-## Building from source
+## 从源码构建
 
-Debug build:
+调试构建：
 
 ```bash
 cargo build
 ```
 
-Optimised release build:
+优化发布构建：
 
 ```bash
 cargo build --release
 ```
 
-The resulting binary is `target/release/raft-daemon`.
+构建产物位于 `target/release/raft-daemon`。
 
-### Cross-compiling release binaries
+### 交叉编译发布二进制文件
 
-The included `./build-release.sh` script builds for all supported targets and signs/notarises macOS binaries. For a single target:
+项目包含 `./build-release.sh` 脚本，用于为所有支持的目标构建，并对 macOS 二进制文件进行签名和公证。针对单个目标：
 
 ```bash
 rustup target add aarch64-unknown-linux-gnu
 cargo build --release --target aarch64-unknown-linux-gnu
 ```
 
-## Runtime requirement
+## 运行时依赖
 
-The default `builtin` runtime is powered by **RustyCLI**. Install it alongside this daemon:
+默认的 `builtin` 运行时由 **RustyCLI** 驱动。请与本守护进程一起安装：
 
 ```bash
 curl -L https://rustycli.com/install | bash
 ```
 
-The daemon discovers `rusty` via `$RAFT_RUSTY_BINARY`, then `rusty`, `rustycli`, or `rusty-cli` on `$PATH`. If RustyCLI is not installed, the daemon reports an empty runtime list and cannot start agents.
+守护进程按以下顺序查找 RustyCLI：`$RAFT_RUSTY_BINARY`，然后是 `PATH` 中的 `rusty`、`rustycli` 或 `rusty-cli`。如果未安装 RustyCLI，守护进程会报告空的运行时列表，无法启动代理。
 
-Both `builtin` and `rusty` advertise different runtime names to the raft server but invoke the same RustyCLI binary.
+`builtin` 和 `rusty` 向 Raft 服务器 advertise 不同的运行时名称，但调用的是同一个 RustyCLI 二进制文件。
 
-## Usage
+## 使用
 
 ```bash
-# Start the daemon (spawns a detached background process)
+# 启动守护进程（默认生成脱离的后台子进程）
 raft-daemon --server-url https://api.raft.build --api-key <key> start
 
-# Start in the foreground
+# 前台运行
 raft-daemon --server-url https://api.raft.build --api-key <key> --foreground start
 
-# Stop the daemon
+# 停止守护进程
 raft-daemon stop
 
-# Show daemon status
+# 查看状态
 raft-daemon status
 
-# Restart requires stop then start (so options can be refreshed)
+# 重启需要先停止再启动（以刷新配置）
 raft-daemon stop && raft-daemon --server-url https://api.raft.build --api-key <key> start
 
-# Use a different profile (isolated home at ~/.raft-daemon/profiles/<name>/)
+# 使用不同的配置文件（独立主目录 ~/.raft-daemon/profiles/<name>/）
 raft-daemon --profile opusfab --server-url https://api.raft.build --api-key <key> start
 raft-daemon --profile opusfab stop
 raft-daemon --profile opusfab status
 ```
 
-### Environment variables
+### 环境变量
 
-| Variable | Description |
-|----------|-------------|
-| `RAFT_SERVER_URL` | Default server URL (default: `https://api.raft.build`) |
-| `RAFT_API_KEY` | Default API key |
-| `RAFT_DAEMON_HOME` | Override the daemon state directory (`~/.raft-daemon`) |
-| `RAFT_RUSTY_BINARY` | Path to the RustyCLI binary |
-| `RUST_LOG` | tracing filter, e.g. `info,raft_daemon=debug` |
+| 变量 | 说明 |
+|------|------|
+| `RAFT_SERVER_URL` | 默认服务器地址（默认：`https://api.raft.build`） |
+| `RAFT_API_KEY` | 默认 API 密钥 |
+| `RAFT_DAEMON_HOME` | 覆盖守护进程状态目录（默认：`~/.raft-daemon`） |
+| `RAFT_RUSTY_BINARY` | RustyCLI 二进制文件路径 |
+| `RUST_LOG` | tracing 过滤器，例如 `info,raft_daemon=debug` |
 
-### Agent management (scaffolding)
+### 代理管理（脚手架）
 
-The `agent` subcommands are parsed and dispatched, but they currently print placeholders. Agents are started and stopped by the raft server via the daemon WebSocket.
+`agent` 子命令已解析和分发，但目前仅打印占位符。代理的实际启动和停止由 Raft 服务器通过守护进程 WebSocket 控制。
 
 ```bash
 raft-daemon agent list
@@ -128,23 +126,23 @@ raft-daemon agent reset <agent_id> --mode <mode>
 raft-daemon agent status <agent_id>
 ```
 
-## Configuration layout
+## 配置目录结构
 
-Each profile is isolated under its own home directory.
+每个配置文件拥有独立的根目录。
 
 ```
-~/.raft-daemon/                          # default profile
-~/.raft-daemon/profiles/<name>/          # named profile
+~/.raft-daemon/                          # 默认配置文件
+~/.raft-daemon/profiles/<name>/          # 命名配置文件
 ├── agents/<agent_id>/
 │   ├── MEMORY.md
 │   ├── notes/
-│   └── ...RustyCLI workspace files
+│   └── ...RustyCLI 工作区文件
 ├── logs/daemon.log
-├── state.json                           # persisted running agents
+├── state.json                           # 持久化的运行中代理
 └── daemon.pid
 ```
 
-## Architecture
+## 架构
 
 ```
 raft-daemon-rust/
@@ -210,36 +208,40 @@ raft-daemon-rust/
 └── scripts/
 ```
 
-## Development
+## 开发
 
 ```bash
-# Clone the repository
+# 克隆仓库
 git clone https://github.com/PDG-Global/raft-rust-daemon.git
 cd raft-daemon-rust
 
-# Run tests
+# 运行测试
 cargo test
 
-# Run clippy
+# 运行 clippy
 cargo clippy
 
-# Build release binary
+# 构建发布二进制文件
 cargo build --release
 ```
 
-## Contributing
+## 贡献
 
-Contributions are welcome! Please see the [CONTRIBUTING.md](CONTRIBUTING.md) file for details.
+欢迎贡献！详情请参阅 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
-## License
+## 许可证
 
-This project is licensed under the [MIT License](LICENSE).
+本项目采用 [MIT 许可证](LICENSE)。
 
-## Security
+## 安全
 
-Found a security issue? Please see [SECURITY.md](SECURITY.md) for responsible disclosure details. Do not open a public issue for security vulnerabilities.
+发现安全问题？请参阅 [SECURITY.md](SECURITY.md) 进行负责任披露。请勿公开提交安全漏洞相关 issue。
 
-## Acknowledgments
+## 致谢
 
-- [Raft](https://raft.build) - The original platform
-- [RustyCLI](https://rustycli.com) - The Rust runtime driver
+- [Raft](https://raft.build) - 原始平台
+- [RustyCLI](https://rustycli.com) - Rust 运行时驱动
+
+---
+
+[English](README.md) | [简体中文](README.zh-CN.md)

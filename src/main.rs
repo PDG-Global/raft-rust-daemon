@@ -26,7 +26,7 @@ async fn main() -> Result<()> {
 
     // Dispatch on the trailing command's first token. We use `first()` rather
     // than slice patterns so flags after the subcommand (e.g.
-    // `raft-daemon start --foreground`) still match.
+    // `raft-daemon --foreground start`) still match.
     match args.command.first().map(String::as_str) {
         // === daemon control ===
         Some("start") => {
@@ -165,7 +165,7 @@ fn print_usage() {
     eprintln!("Usage: raft-daemon [options] <command> [args...]");
     eprintln!();
     eprintln!("Daemon commands:");
-    eprintln!("  start [--server-url <url>] [--api-key <key>] [--profile <p>]");
+    eprintln!("  --server-url <url> --api-key <key> start");
     eprintln!("                               Start the daemon (backgrounds by default)");
     eprintln!("      --foreground             Run in the foreground instead");
     eprintln!("  stop                         Stop the running daemon");
