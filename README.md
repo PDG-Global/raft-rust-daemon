@@ -137,37 +137,38 @@ The daemon supports multiple runtime drivers:
 
 ### RustyCLI
 
-RustyCLI is a lightweight, terminal-native coding agent that:
+RustyCLI is the terminal-native coding agent that powers both the `rusty` and
+`builtin` runtimes. It is a single binary with zero telemetry, "bring your own
+model" support, context-aware edits across your whole tree, command sandboxing
+with approvals, and diff-before-apply behaviour.
 
-- Is a single 12 MB binary
-- Has zero telemetry
-- Supports "bring your own model"
-- Provides context-aware edits across your whole tree
-- Runs commands in a sandbox with approvals
-- Shows diffs before anything lands
-- Includes Vault for secure secret management
-- Uses Cassette for fast boot & replay
-
-To use RustyCLI:
+**Install RustyCLI alongside this daemon:**
 
 ```bash
-# Install RustyCLI
 curl -L https://rustycli.com/install.sh | bash
+```
 
-# Start the daemon with RustyCLI
+To use RustyCLI directly:
+
+```bash
 raft-daemon start --server-url <url> --api-key <key> --runtime rusty
 ```
 
 ### Built-in
 
-The built-in runtime is a fallback for environments without RustyCLI. It provides basic command execution and file operations.
+The built-in runtime is the default runtime for this daemon. It is backed by
+RustyCLI and requires the `rusty` binary to be installed and available on
+`$PATH` (or via `$RAFT_RUSTY_BINARY`). If RustyCLI is not installed, the daemon
+reports an empty runtime list and will not be able to start agents.
 
 To use the built-in runtime:
 
 ```bash
-# Start the daemon with built-in runtime
 raft-daemon start --server-url <url> --api-key <key> --runtime builtin
 ```
+
+Both `rusty` and `builtin` ultimately invoke the same RustyCLI binary; the only
+difference is which runtime name is advertised to the raft server.
 
 ## Architecture
 

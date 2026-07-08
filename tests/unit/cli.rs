@@ -18,6 +18,7 @@ fn test_cli_command_daemon_start() {
             server_url: "wss://test".to_string(),
             api_key: "key-1".to_string(),
             profile: "test".to_string(),
+            foreground: false,
         },
     };
 
@@ -28,11 +29,13 @@ fn test_cli_command_daemon_start() {
                     server_url,
                     api_key,
                     profile,
+                    foreground,
                 },
         } => {
             assert_eq!(server_url, "wss://test");
             assert_eq!(api_key, "key-1");
             assert_eq!(profile, "test");
+            assert!(!foreground);
         }
         _ => panic!("Expected Daemon::Start"),
     }

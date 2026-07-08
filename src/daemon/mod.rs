@@ -11,6 +11,10 @@
 //! - [`reminder`]: scheduling and dispatch of timed reminders
 //! - [`workspace`]: per-agent filesystem workspaces
 //! - [`runtime`]: runtime lifecycle glue
+//! - [`runner`]: foreground/background daemon orchestration (`start` / `stop` /
+//!   `status` / `restart`)
+//! - [`paths`]: filesystem locations under `~/.raft-daemon/`
+//! - [`pidfile`]: PID file management for the running daemon
 //! - [`apm`]: application performance monitoring hooks
 //! - [`trace`]: OpenTelemetry tracing setup
 //!
@@ -22,7 +26,10 @@ pub mod agent;
 pub mod apm;
 pub mod computer;
 pub mod message;
+pub mod paths;
+pub mod pidfile;
 pub mod reminder;
+pub mod runner;
 pub mod runtime;
 pub mod server;
 pub mod state;

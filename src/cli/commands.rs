@@ -1,6 +1,9 @@
 //! CLI commands for the Raft daemon.
 
 use anyhow::Result;
+use tracing::info;
+
+use crate::daemon::runner::{self, DaemonOptions, StartOutcome, StatusReport};
 
 /// Mask a secret for display, showing only the first and last few characters.
 ///
@@ -82,6 +85,13 @@ pub enum DaemonCommand {
         /// The profile to use.
         #[arg(short, long, default_value = "default")]
         profile: String,
+        /// Run in the foreground instead of spawning a detached child.
+        ///
+        /// Set automatically by the background spawner; pass it explicitly to
+        /// run the daemon in the current shell (e.g. under a process
+        /// supervisor).
+        #[arg(long)]
+        foreground: bool,
     },
     /// Stop the daemon.
     Stop,
@@ -417,35 +427,57 @@ pub enum DebugCommand {
 
 /// Execute a CLI command.
 ///
+/// `async` because the daemon control commands (`start` / `stop` / `restart` /
+/// `status`) drive async I/O under the hood.
+///
 /// # Errors
 ///
 /// Returns an error if the selected command fails to run, e.g. a failure to
 /// start the daemon, a failed HTTP request, or a malformed response.
-pub fn execute_command(command: &CliCommand) -> Result<()> {
+pub async fn execute_command(command: &CliCommand) -> Result<()> {
     match command {
         CliCommand::Daemon { command } => match command {
             DaemonCommand::Start {
                 server_url,
                 api_key,
                 profile,
+                foreground,
             } => {
-                // Start the daemon
-                println!("Starting daemon with profile: {profile}");
-                println!("Server URL: {server_url}");
-                println!("API Key: {}", mask_secret(api_key));
+                let opts = DaemonOptions {
+                    server_url: server_url.clone(),
+                    api_key: api_key.clone(),
+                    profile: profile.clone(),
+                    foreground: *foreground,
+                };
+                match runner::start(opts).await? {
+                    StartOutcome::Spawned(pid) => {
+                        info!(pid = pid, "daemon spawned");
+                    }
+                    StartOutcome::ForegroundFinished => {
+                        info!("daemon foreground run completed");
+                    }
+                }
             }
             DaemonCommand::Stop => {
-                // Stop the daemon
-                println!("Stopping daemon");
+                runner::stop().await?;
             }
             DaemonCommand::Restart => {
-                // Restart the daemon
-                println!("Restarting daemon");
+                // Restart needs the same opts as start; without re-parsing
+                // we can only stop. Print guidance.
+                println!("Use `raft-daemon stop` then `raft-daemon start ...` to restart with updated options.");
+                println!("(Restart reuses server URL / API key from the previous invocation, which is not yet stored.)");
             }
-            DaemonCommand::Status => {
-                // Show daemon status
-                println!("Daemon status: running");
-            }
+            DaemonCommand::Status => match runner::status()? {
+                StatusReport::Running(pid) => {
+                    println!("raft daemon: {pid}");
+                }
+                StatusReport::NotConfigured => {
+                    println!("raft daemon: not running");
+                }
+                StatusReport::Stale(pid) => {
+                    println!("raft daemon: not running (stale pid file for pid={pid})");
+                }
+            },
         },
         CliCommand::Agent { command } => match command {
             AgentCommand::List => {
@@ -690,7 +722,7 @@ pub fn execute_command(command: &CliCommand) -> Result<()> {
             }
             DebugCommand::Version => {
                 // Show version
-                println!("Version: 0.1.0");
+                println!("Version: {}", env!("CARGO_PKG_VERSION"));
             }
         },
     }

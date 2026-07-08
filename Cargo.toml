@@ -15,7 +15,7 @@ categories = ["command-line-utilities", "asynchronous"]
 
 [dependencies]
 tokio = { version = "1", features = ["full", "rt-multi-thread", "macros", "sync", "time", "fs", "io-util", "net", "process", "signal", "socket2", "tracing"] }
-tokio-tungstenite = { version = "0.24", features = ["__rustls-tls"] }
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }
 tokio-util = { version = "0.7", features = ["compat", "codec"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
@@ -52,6 +52,7 @@ walkdir = "2"
 globwalk = "0.8"
 flate2 = "1"
 tar = "0.4.46"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tokio-stream = "0.1"
 futures = "0.3"
 bytes = "1"

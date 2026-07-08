@@ -45,6 +45,16 @@ pub struct CliArgs {
     #[arg(short, long)]
     pub verbose: bool,
 
+    /// Run the daemon in the foreground instead of detaching.
+    ///
+    /// When invoking `start`, the default behaviour is to spawn a detached
+    /// child and return. Pass `--foreground` (either before or after the
+    /// subcommand) to take over the terminal and run the daemon loop in the
+    /// current process. This flag is also set internally by the spawned
+    /// background child.
+    #[arg(long)]
+    pub foreground: bool,
+
     /// The command to run.
     #[arg(trailing_var_arg = true)]
     pub command: Vec<String>,
@@ -55,7 +65,7 @@ impl CliArgs {
     pub fn server_url(&self) -> String {
         self.server_url.clone().unwrap_or_else(|| {
             // Default from profile or environment
-            std::env::var("RAFT_SERVER_URL").unwrap_or_else(|_| "wss://app.raft.build".to_string())
+            std::env::var("RAFT_SERVER_URL").unwrap_or_else(|_| "api.raft.build".to_string())
         })
     }
 
@@ -94,6 +104,17 @@ impl CliArgs {
     /// Check if verbose mode is enabled.
     pub fn is_verbose(&self) -> bool {
         self.verbose
+    }
+
+    /// Check if the daemon should run in the foreground.
+    ///
+    /// Returns `true` if either `--foreground` was parsed as a top-level flag
+    /// (e.g. `raft-daemon --foreground start`) **or** it appears in the
+    /// trailing command vector (e.g. `raft-daemon start --foreground`). The
+    /// latter is not parsed by clap because of `trailing_var_arg`, so we scan
+    /// the command tail explicitly.
+    pub fn is_foreground(&self) -> bool {
+        self.foreground || self.command.iter().any(|c| c == "--foreground")
     }
 
     /// Get the command arguments.
