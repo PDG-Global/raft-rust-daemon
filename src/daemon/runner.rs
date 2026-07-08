@@ -846,6 +846,15 @@ async fn handle_server_message(
                 .unwrap_or("")
                 .to_string();
 
+            // Dump the raw delivery payload so operators can inspect schema
+            // details (sender, mentions, channel, memory, etc.) in debug logs.
+            tracing::debug!(
+                agent_id = %agent_id,
+                seq = seq,
+                delivery = %value,
+                "raw agent:deliver payload"
+            );
+
             // Ack first so the server stops retrying — see npm
             // `sendDeliveryAck` at chunk-URPIDKXK.js:21942.
             send_json(
@@ -881,7 +890,6 @@ async fn handle_server_message(
                 run_agent_turn(
                     &agents_clone,
                     &agent_id_for_task,
-                    &prompt,
                     &delivery_clone,
                     &server_url_clone,
                     launch_id_clone.as_deref(),
@@ -1059,6 +1067,77 @@ async fn send_agent_activity(
     send_json(outbound, serde_json::Value::Object(payload)).await
 }
 
+/// Decide whether an agent should respond to an `agent:deliver` payload and,
+/// if so, build a prompt for RustyCLI that mirrors the npm daemon's stdin
+/// format.
+///
+/// Returns `None` when the delivery should be ignored (self-echo, bot chatter
+/// in a public channel, etc.). The reason is logged at debug level so
+/// operators can audit the decision.
+fn prepare_delivery_prompt(agent_id: &str, delivery: &serde_json::Value) -> Option<String> {
+    let msg = delivery.get("message")?;
+    let content = msg
+        .get("content")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if content.is_empty() {
+        tracing::debug!(agent_id = %agent_id, "skipping delivery: empty message content");
+        return None;
+    }
+
+    // Sender id can be in a couple of field names depending on server version.
+    let sender_id = msg
+        .get("sender_id")
+        .or_else(|| msg.get("senderId"))
+        .and_then(|v| v.as_str());
+    if let Some(sid) = sender_id {
+        if sid == agent_id {
+            tracing::debug!(agent_id = %agent_id, "skipping delivery: self-echo");
+            return None;
+        }
+    }
+
+    let channel_kind = msg
+        .get("channel_kind")
+        .or_else(|| msg.get("channel_type"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let is_dm = channel_kind == "dm";
+
+    let sender_type = msg
+        .get("sender_type")
+        .or_else(|| msg.get("senderType"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if sender_type == "bot" && !is_dm {
+        tracing::debug!(
+            agent_id = %agent_id,
+            sender_id = ?sender_id,
+            "skipping delivery: bot message in public channel"
+        );
+        return None;
+    }
+
+    let target = crate::daemon::agent::derive_target(delivery).unwrap_or_default();
+    let msg_id = msg
+        .get("message_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("-");
+    let time = msg
+        .get("timestamp")
+        .and_then(serde_json::Value::as_i64)
+        .and_then(|ts| chrono::DateTime::from_timestamp_millis(ts).map(|dt| dt.to_rfc3339()))
+        .unwrap_or_else(|| "-".to_string());
+    let sender_name = msg
+        .get("sender_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+
+    Some(format!(
+        "New message received:\n\n[target={target} msg={msg_id} time={time} type={sender_type}] @{sender_name}: {content}\n\nRespond as appropriate. Only reply if you are directly addressed, this is a DM, or you have an explicit task. Complete all your work before stopping."
+    ))
+}
+
 /// Run one RustyCLI turn for an inbound delivery.
 ///
 /// - Broadcasts `agent:activity: working` before spawn.
@@ -1073,7 +1152,6 @@ async fn send_agent_activity(
 async fn run_agent_turn(
     agents: &Arc<AgentProcessRegistry>,
     agent_id: &str,
-    prompt: &str,
     delivery: &serde_json::Value,
     server_url: &str,
     launch_id: Option<&str>,
@@ -1090,11 +1168,18 @@ async fn run_agent_turn(
         return;
     };
 
+    // Decide whether to respond and build a prompt that mirrors the npm
+    // daemon's stdin format (target, sender, context) plus an explicit
+    // instruction to only reply when addressed.
+    let Some(prompt) = prepare_delivery_prompt(agent_id, delivery) else {
+        return;
+    };
+
     if let Err(err) = send_agent_activity(outbound, agent_id, "working", "Thinking…", launch_ref, process.next_activity_client_seq()).await {
         warn!(error = %err, "failed to broadcast working activity");
     }
 
-    let result = run_one_turn(&process, prompt).await;
+    let result = run_one_turn(&process, &prompt).await;
 
     match result {
         Ok(response) => {
@@ -1738,5 +1823,91 @@ mod tests {
             StatusReport::Stale(456).to_string(),
             "not running (stale pid file for pid=456)"
         );
+    }
+
+    #[test]
+    fn prepare_delivery_prompt_skips_self_echo() {
+        let agent_id = "ag_123";
+        let delivery = serde_json::json!({
+            "message": {
+                "content": "hello",
+                "sender_id": agent_id,
+                "sender_name": "agent",
+                "channel_type": "channel",
+                "channel_name": "general",
+            }
+        });
+        assert!(prepare_delivery_prompt(agent_id, &delivery).is_none());
+    }
+
+    #[test]
+    fn prepare_delivery_prompt_skips_bot_in_public_channel() {
+        let delivery = serde_json::json!({
+            "message": {
+                "content": "hello",
+                "sender_id": "ag_other",
+                "sender_type": "bot",
+                "sender_name": "other-bot",
+                "channel_type": "channel",
+                "channel_name": "general",
+            }
+        });
+        assert!(prepare_delivery_prompt("ag_123", &delivery).is_none());
+    }
+
+    #[test]
+    fn prepare_delivery_prompt_allows_bot_in_dm() {
+        let delivery = serde_json::json!({
+            "message": {
+                "content": "hello",
+                "sender_id": "ag_other",
+                "sender_type": "bot",
+                "sender_name": "other-bot",
+                "channel_type": "dm",
+                "sender_name": "other-bot",
+            }
+        });
+        let prompt = prepare_delivery_prompt("ag_123", &delivery).unwrap();
+        assert!(prompt.contains("hello"));
+        assert!(prompt.contains("New message received:"));
+    }
+
+    #[test]
+    fn prepare_delivery_prompt_allows_human_in_channel() {
+        let delivery = serde_json::json!({
+            "message": {
+                "content": "can you help?",
+                "sender_id": "user_42",
+                "sender_type": "human",
+                "sender_name": "alice",
+                "channel_type": "channel",
+                "channel_name": "general",
+            }
+        });
+        let prompt = prepare_delivery_prompt("ag_123", &delivery).unwrap();
+        assert!(prompt.contains("can you help?"));
+        assert!(prompt.contains("@alice"));
+        assert!(prompt.contains("#general"));
+        assert!(prompt.contains("Only reply if you are directly addressed"));
+    }
+
+    #[test]
+    fn prepare_delivery_prompt_formats_payload_like_npm() {
+        let delivery = serde_json::json!({
+            "message": {
+                "message_id": "msg_abc",
+                "timestamp": 1700000000000_i64,
+                "content": "fix the bug",
+                "sender_id": "user_1",
+                "sender_type": "human",
+                "sender_name": "bob",
+                "channel_type": "channel",
+                "channel_name": "dev",
+            }
+        });
+        let prompt = prepare_delivery_prompt("ag_123", &delivery).unwrap();
+        assert!(prompt.contains("[target=#dev msg=msg_abc"));
+        assert!(prompt.contains("type=human] @bob: fix the bug"));
+        assert!(prompt.contains("Respond as appropriate"));
     }
 }
