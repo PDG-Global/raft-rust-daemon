@@ -55,6 +55,19 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
 /// not post this marker (or an empty response) to raft.
 const NO_REPLY_MARKER: &str = "NO_REPLY";
 
+/// Strip a leading `NO_REPLY` marker (case-insensitive) and any trailing
+/// whitespace from a response. Returns the trimmed input unchanged if the
+/// marker is not present.
+fn strip_no_reply_marker(s: &str) -> &str {
+    let s = s.trim();
+    for marker in [NO_REPLY_MARKER, "no_reply", "No_Reply"] {
+        if let Some(rest) = s.strip_prefix(marker) {
+            return rest.trim();
+        }
+    }
+    s
+}
+
 /// Options describing how to start the daemon.
 #[derive(Debug, Clone)]
 pub struct DaemonOptions {
@@ -1555,14 +1568,15 @@ async fn run_agent_turn(
     match result {
         Ok(response) => {
             let trimmed = response.trim();
-            info!(agent_id = agent_id, response_len = trimmed.len(), "rusty turn completed");
-            tracing::info!(target: "raft_daemon::agent::response", agent_id = agent_id, response = %trimmed);
+            let cleaned = strip_no_reply_marker(trimmed);
+            info!(agent_id = agent_id, response_len = cleaned.len(), "rusty turn completed");
+            tracing::info!(target: "raft_daemon::agent::response", agent_id = agent_id, response = %cleaned);
 
-            if trimmed.is_empty() || trimmed.eq_ignore_ascii_case(NO_REPLY_MARKER) {
+            if cleaned.is_empty() {
                 tracing::debug!(agent_id = %agent_id, "rusty chose not to reply; skipping raft post");
             } else {
                 // POST the response to raft so it shows up in chat.
-                post_agent_reply(&process, delivery, server_url, trimmed).await;
+                post_agent_reply(&process, delivery, server_url, cleaned).await;
             }
 
             if let Err(err) =
@@ -2300,5 +2314,35 @@ mod tests {
         assert!(prompt.contains("[target=#dev msg=msg_abc"));
         assert!(prompt.contains("type=human] @bob: fix the bug"));
         assert!(prompt.contains("You are in a team channel"));
+    }
+
+    #[test]
+    fn strip_no_reply_marker_strips_marker_and_returns_content() {
+        assert_eq!(
+            strip_no_reply_marker("NO_REPLY\n\nThese messages aren't relevant."),
+            "These messages aren't relevant."
+        );
+    }
+
+    #[test]
+    fn strip_no_reply_marker_is_case_insensitive() {
+        assert_eq!(
+            strip_no_reply_marker("no_reply  Here is the answer."),
+            "Here is the answer."
+        );
+    }
+
+    #[test]
+    fn strip_no_reply_marker_returns_empty_for_marker_only() {
+        assert!(strip_no_reply_marker("NO_REPLY").is_empty());
+        assert!(strip_no_reply_marker("  NO_REPLY  ").is_empty());
+    }
+
+    #[test]
+    fn strip_no_reply_marker_leaves_unmarked_response_intact() {
+        assert_eq!(
+            strip_no_reply_marker("Here is the answer."),
+            "Here is the answer."
+        );
     }
 }
