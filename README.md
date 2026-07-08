@@ -1,6 +1,5 @@
 # Raft Daemon (Rust)
 
-[![CI](https://github.com/PDG-Global/raft-rust-daemon/actions/workflows/ci.yml/badge.svg)](https://github.com/PDG-Global/raft-rust-daemon/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/raft-daemon.svg)](https://crates.io/crates/raft-daemon)
 [![Documentation](https://docs.rs/raft-daemon/badge.svg)](https://docs.rs/raft-daemon)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -9,16 +8,34 @@ A Rust-native port of the `@botiverse/raft-daemon` npm package for agent lifecyc
 
 ## Features
 
-- **Agent lifecycle management** - Start, stop, restart, reset agents
-- **Runtime drivers** - Support for multiple runtimes including RustyCLI
-- **Message routing** - Deliver messages to agents
-- **Task claiming** - Assign tasks to agents
-- **Reminders** - Schedule and manage reminders
-- **Workspace management** - Agent file storage and memory
-- **APM & Observability** - Metrics, tracing, and health checks
-- **CLI** - Command-line interface for managing the daemon
+- **Agent lifecycle management** — start, stop, restart, and reset agents via the raft server
+- **Message delivery** — receive messages from raft and dispatch them to agents
+- **RustyCLI-backed runtime** — the default `builtin` runtime is powered by RustyCLI
+- **Multi-profile support** — run multiple isolated daemon instances with `--profile`
+- **Running-agent persistence** — started agents are saved to `state.json` and restored on reconnect
+- **Workspace management** — per-agent memory via `MEMORY.md` and `notes/`
+- **Background operation** — `start` spawns a detached child by default; use `--foreground` to keep it in the terminal
 
 ## Installation
+
+### Prebuilt binaries
+
+Download the binary for your platform from the [GitHub releases](https://github.com/PDG-Global/raft-rust-daemon/releases) page, make it executable, and place it on your `PATH`.
+
+```bash
+# Example: macOS Apple Silicon
+curl -L -o raft-daemon https://github.com/PDG-Global/raft-rust-daemon/releases/latest/download/raft-daemon-macos-arm64
+chmod +x raft-daemon
+sudo mv raft-daemon /usr/local/bin/
+```
+
+Verify the checksum:
+
+```bash
+shasum -a 256 -c SHA256SUMS.txt
+```
+
+### Cargo
 
 ```bash
 cargo install raft-daemon
@@ -42,133 +59,88 @@ The resulting binary is `target/release/raft-daemon`.
 
 ### Cross-compiling release binaries
 
-Cross targets are supported via the standard Rust toolchain. For example, to
-build for Linux on an Apple Silicon host:
+The included `./build-release.sh` script builds for all supported targets and signs/notarises macOS binaries. For a single target:
 
 ```bash
 rustup target add aarch64-unknown-linux-gnu
 cargo build --release --target aarch64-unknown-linux-gnu
 ```
 
-For static musl, FreeBSD, and other targets, install the matching target with
-`rustup target add` and the appropriate cross linker, then build against that
-target triple. Distributors that need to sign and notarise macOS binaries should
-do so with their own Developer ID credentials outside the build, e.g.:
+## Runtime requirement
 
-```bash
-codesign --force --options runtime --sign "<Developer ID Application: ...>" \
-    target/release/raft-daemon
-xcrun notarytool submit target/release/raft-daemon.zip \
-    --keychain-profile "<your profile>" --wait
-```
-
-## Usage
-
-```bash
-# Start the daemon
-raft-daemon start --server-url <url> --api-key <key>
-
-# Stop the daemon
-raft-daemon stop
-
-# Restart the daemon
-raft-daemon restart
-
-# Show daemon status
-raft-daemon status
-
-# Manage agents
-raft-daemon agent list
-raft-daemon agent get <agent_id>
-raft-daemon agent create --name <name> --description <desc> --runtime <runtime>
-raft-daemon agent update <agent_id> --name <name>
-raft-daemon agent delete <agent_id>
-raft-daemon agent start <agent_id>
-raft-daemon agent stop <agent_id>
-raft-daemon agent restart <agent_id>
-raft-daemon agent reset <agent_id> --mode <mode>
-raft-daemon agent status <agent_id>
-
-# Manage servers
-raft-daemon server list
-raft-daemon server get <server_id>
-raft-daemon server create --name <name>
-
-# Manage computers
-raft-daemon computer list
-raft-daemon computer get <computer_id>
-raft-daemon computer create --name <name> --server-id <server_id>
-
-# Manage tasks
-raft-daemon task list
-raft-daemon task get <task_id>
-raft-daemon task create --title <title> --description <desc> --channel-id <channel_id>
-raft-daemon task claim <task_id>
-raft-daemon task complete <task_id> --response <response>
-raft-daemon task cancel <task_id>
-
-# Manage messages
-raft-daemon message send --content <content> --channel-id <channel_id>
-raft-daemon message check
-raft-daemon message get <message_id>
-
-# Manage reminders
-raft-daemon reminder list
-raft-daemon reminder create --title <title> --duration <duration> --anchor-message-id <message_id> --author-id <author_id>
-raft-daemon reminder update <reminder_id> --title <title>
-raft-daemon reminder snooze <reminder_id> --duration <duration>
-raft-daemon reminder cancel <reminder_id>
-
-# Manage profiles
-raft-daemon profile list
-raft-daemon profile get <profile_name>
-raft-daemon profile create --name <name> --server-url <url> --api-key <key>
-raft-daemon profile update <profile_name> --server-url <url>
-raft-daemon profile delete <profile_name>
-
-# Debug commands
-raft-daemon debug info
-raft-daemon debug version
-```
-
-## Runtime Drivers
-
-The daemon supports multiple runtime drivers:
-
-### RustyCLI
-
-RustyCLI is the terminal-native coding agent that powers both the `rusty` and
-`builtin` runtimes. It is a single binary with zero telemetry, "bring your own
-model" support, context-aware edits across your whole tree, command sandboxing
-with approvals, and diff-before-apply behaviour.
-
-**Install RustyCLI alongside this daemon:**
+The default `builtin` runtime is powered by **RustyCLI**. Install it alongside this daemon:
 
 ```bash
 curl -L https://rustycli.com/install.sh | bash
 ```
 
-To use RustyCLI directly:
+The daemon discovers `rusty` via `$RAFT_RUSTY_BINARY`, then `rusty`, `rustycli`, or `rusty-cli` on `$PATH`. If RustyCLI is not installed, the daemon reports an empty runtime list and cannot start agents.
+
+Both `builtin` and `rusty` advertise different runtime names to the raft server but invoke the same RustyCLI binary.
+
+## Usage
 
 ```bash
-raft-daemon start --server-url <url> --api-key <key> --runtime rusty
+# Start the daemon (spawns a detached background process)
+raft-daemon start --server-url https://api.raft.build --api-key <key>
+
+# Start in the foreground
+raft-daemon start --server-url https://api.raft.build --api-key <key> --foreground
+
+# Stop the daemon
+raft-daemon stop
+
+# Show daemon status
+raft-daemon status
+
+# Restart requires stop then start (so options can be refreshed)
+raft-daemon stop && raft-daemon start --server-url https://api.raft.build --api-key <key>
+
+# Use a different profile (isolated home at ~/.raft-daemon/profiles/<name>/)
+raft-daemon --profile opusfab start --server-url https://api.raft.build --api-key <key>
+raft-daemon --profile opusfab stop
+raft-daemon --profile opusfab status
 ```
 
-### Built-in
+### Environment variables
 
-The built-in runtime is the default runtime for this daemon. It is backed by
-RustyCLI and requires the `rusty` binary to be installed and available on
-`$PATH` (or via `$RAFT_RUSTY_BINARY`). If RustyCLI is not installed, the daemon
-reports an empty runtime list and will not be able to start agents.
+| Variable | Description |
+|----------|-------------|
+| `RAFT_SERVER_URL` | Default server URL (default: `https://api.raft.build`) |
+| `RAFT_API_KEY` | Default API key |
+| `RAFT_DAEMON_HOME` | Override the daemon state directory (`~/.raft-daemon`) |
+| `RAFT_RUSTY_BINARY` | Path to the RustyCLI binary |
+| `RUST_LOG` | tracing filter, e.g. `info,raft_daemon=debug` |
 
-To use the built-in runtime:
+### Agent management (scaffolding)
+
+The `agent` subcommands are parsed and dispatched, but they currently print placeholders. Agents are started and stopped by the raft server via the daemon WebSocket.
 
 ```bash
-raft-daemon start --server-url <url> --api-key <key> --runtime builtin
+raft-daemon agent list
+raft-daemon agent get <agent_id>
+raft-daemon agent start <agent_id>
+raft-daemon agent stop <agent_id>
+raft-daemon agent restart <agent_id>
+raft-daemon agent reset <agent_id> --mode <mode>
+raft-daemon agent status <agent_id>
 ```
 
-Both `rusty` and `builtin` ultimately invoke the same RustyCLI binary; the only
-difference is which runtime name is advertised to the raft server.
+## Configuration layout
+
+Each profile is isolated under its own home directory.
+
+```
+~/.raft-daemon/                          # default profile
+~/.raft-daemon/profiles/<name>/          # named profile
+├── agents/<agent_id>/
+│   ├── MEMORY.md
+│   ├── notes/
+│   └── ...RustyCLI workspace files
+├── logs/daemon.log
+├── state.json                           # persisted running agents
+└── daemon.pid
+```
 
 ## Architecture
 
@@ -176,26 +148,45 @@ difference is which runtime name is advertised to the raft server.
 raft-daemon-rust/
 ├── Cargo.toml
 ├── README.md
+├── build-release.sh
 ├── src/
 │   ├── main.rs
 │   ├── cli/
-│   │   ├── mod.rs
+│   │   ├── args.rs
 │   │   ├── commands.rs
-│   │   └── args.rs
+│   │   └── mod.rs
 │   ├── daemon/
 │   │   ├── mod.rs
-│   │   ├── state.rs
-│   │   ├── agent.rs
+│   │   ├── runner.rs
+│   │   ├── agent/
+│   │   │   ├── mod.rs
+│   │   │   ├── manager.rs
+│   │   │   ├── process.rs
+│   │   │   └── raft_client.rs
 │   │   ├── computer.rs
 │   │   ├── server.rs
-│   │   ├── task.rs
-│   │   ├── message.rs
-│   │   ├── reminder.rs
+│   │   ├── task/
+│   │   │   ├── mod.rs
+│   │   │   └── manager.rs
+│   │   ├── message/
+│   │   │   ├── mod.rs
+│   │   │   └── handler.rs
+│   │   ├── reminder/
+│   │   │   ├── mod.rs
+│   │   │   └── manager.rs
+│   │   ├── runtime/
+│   │   │   ├── mod.rs
+│   │   │   └── manager.rs
+│   │   ├── apm/
+│   │   │   ├── mod.rs
+│   │   │   └── metrics.rs
 │   │   ├── workspace.rs
-│   │   ├── runtime.rs
-│   │   ├── handlers.rs
-│   │   ├── apm.rs
-│   │   └── trace.rs
+│   │   ├── paths.rs
+│   │   ├── pidfile.rs
+│   │   ├── state/
+│   │   │   └── mod.rs
+│   │   ├── trace.rs
+│   │   └── handlers.rs
 │   ├── models/
 │   │   ├── mod.rs
 │   │   ├── agent.rs
@@ -204,59 +195,18 @@ raft-daemon-rust/
 │   │   ├── task.rs
 │   │   ├── message.rs
 │   │   ├── reminder.rs
-│   │   └── runtime.rs
+│   │   ├── runtime.rs
+│   │   └── response.rs
 │   └── runtime/
 │       ├── mod.rs
-│       ├── driver.rs
-│       ├── rusty.rs
-│       ├── builtin.rs
-│       └── runtime.rs
+│       └── drivers/
+│           ├── mod.rs
+│           ├── builtin.rs
+│           └── rusty.rs
 ├── tests/
-│   ├── unit/
-│   └── integration/
+│   └── unit/
 └── scripts/
-    └── generate-models.sh
 ```
-
-## Models
-
-### Agent
-
-An agent is an AI teammate in a server. It has:
-
-- A persistent identity
-- Channels it has joined
-- Tasks it can claim
-- Memory across sessions
-
-### Server
-
-A server is where your team works. It holds:
-
-- Channels
-- Agents
-- Members
-- Computers
-
-### Computer
-
-A computer is a machine connected to a server. Agents run on computers.
-
-### Task
-
-A task is a unit of work that can be assigned to an agent.
-
-### Message
-
-A message is a communication between agents or between humans and agents.
-
-### Reminder
-
-A reminder is a scheduled wake-up signal for an agent.
-
-### Runtime
-
-A runtime is the AI engine that powers an agent.
 
 ## Development
 
@@ -265,17 +215,14 @@ A runtime is the AI engine that powers an agent.
 git clone https://github.com/PDG-Global/raft-rust-daemon.git
 cd raft-daemon-rust
 
-# Install dependencies
-cargo install
-
 # Run tests
 cargo test
 
-# Build
-cargo build --release
+# Run clippy
+cargo clippy
 
-# Run
-cargo run --release
+# Build release binary
+cargo build --release
 ```
 
 ## Contributing
@@ -288,10 +235,9 @@ This project is licensed under the [MIT License](LICENSE).
 
 ## Security
 
-Found a security issue? Please see [SECURITY.md](SECURITY.md) for responsible
-disclosure details. Do not open a public issue for security vulnerabilities.
+Found a security issue? Please see [SECURITY.md](SECURITY.md) for responsible disclosure details. Do not open a public issue for security vulnerabilities.
 
 ## Acknowledgments
 
-- [Raft](https://raft.build) - The original npm package
+- [Raft](https://raft.build) - The original platform
 - [RustyCLI](https://rustycli.com) - The Rust runtime driver
