@@ -1481,8 +1481,22 @@ fn prepare_delivery_prompt(
     // so the daemon no longer injects them into the prompt.
     let context_header = format!("You are {name}. {description}\n\n");
 
+    let instruction = if is_dm {
+        format!(
+            "This is a direct message to you. Respond helpfully and concisely. \
+             Only output `{NO_REPLY_MARKER}` if the message is completely unrelated to your role. \
+             Complete all your work before stopping."
+        )
+    } else {
+        format!(
+            "You are in a team channel. If this message is addressed to you, the team, the channel, or falls within your role, respond helpfully and concisely. \
+             Only output `{NO_REPLY_MARKER}` for messages that are clearly irrelevant, private side-conversations, or do not require your input. \
+             Complete all your work before stopping."
+        )
+    };
+
     Some(format!(
-        "{context_header}New message received:\n\n[target={target} msg={msg_id} time={time} type={sender_type}] @{sender_name}: {content}\n\nYou are in a team channel. If this message is addressed to you, the team, the channel, or falls within your role, respond helpfully and concisely. Only output `{NO_REPLY_MARKER}` for messages that are clearly irrelevant, private side-conversations, or do not require your input. Complete all your work before stopping."
+        "{context_header}New message received:\n\n[target={target} msg={msg_id} time={time} type={sender_type}] @{sender_name}: {content}\n\n{instruction}"
     ))
 }
 
