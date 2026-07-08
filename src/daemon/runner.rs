@@ -35,7 +35,7 @@ use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 use crate::daemon::agent::{
-    AgentProcess, AgentProcessRegistry, SendBody, ensure_agents_dir, mint_runner_credential,
+    AgentProcess, AgentProcessRegistry, SendBody, mint_runner_credential,
     run_one_turn, send_agent_message, ProviderConfig,
 };
 use crate::daemon::paths;
@@ -164,11 +164,11 @@ pub async fn start(opts: DaemonOptions) -> Result<StartOutcome> {
 
 /// Spawn a detached child running the daemon in foreground mode.
 fn spawn_background(opts: &DaemonOptions) -> Result<u32> {
-    let pid_path = paths::pid_file()?;
+    let pid_path = paths::pid_file_for_profile(&opts.profile)?;
     refuse_if_already_running(&pid_path)?;
 
     let exe = std::env::current_exe().context("locating current executable")?;
-    let log_file = open_log_writer()?;
+    let log_file = open_log_writer(&opts.profile)?;
 
     // Build the std command first so we can attach Unix-specific pre_exec
     // (setsid) before converting into a tokio command.
@@ -203,9 +203,10 @@ fn spawn_background(opts: &DaemonOptions) -> Result<u32> {
     let pid_i32 = i32::try_from(pid).unwrap_or(i32::MAX);
     pidfile::write_pid(&pid_path, pid_i32)?;
 
+    let home = paths::home_dir_for_profile(&opts.profile)?;
     println!("raft daemon started (pid={pid})");
-    println!("  home:    {}", paths::home_dir()?.display());
-    println!("  logs:    {}", paths::log_file()?.display());
+    println!("  home:    {}", home.display());
+    println!("  logs:    {}", paths::log_file_for_profile(&opts.profile)?.display());
     println!("  server:  {}", opts.server_url);
     println!("  profile: {}", opts.profile);
     println!("\nUse `raft-daemon stop` to shut down.");
@@ -215,8 +216,8 @@ fn spawn_background(opts: &DaemonOptions) -> Result<u32> {
 
 /// Open the daemon log file in append mode for redirecting the spawned
 /// child's stdout/stderr.
-fn open_log_writer() -> Result<std::fs::File> {
-    let path = paths::log_file()?;
+fn open_log_writer(profile: &str) -> Result<std::fs::File> {
+    let path = paths::log_file_for_profile(profile)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
@@ -311,22 +312,24 @@ fn refuse_if_already_running(pid_path: &std::path::Path) -> Result<()> {
 
 /// Run the daemon in the foreground until shutdown is requested.
 async fn run_foreground(opts: DaemonOptions) -> Result<()> {
-    init_tracing()?;
+    init_tracing(&opts.profile)?;
 
-    let pid_path = paths::pid_file()?;
+    let home = paths::home_dir_for_profile(&opts.profile)?;
+    let pid_path = paths::pid_file_for_profile(&opts.profile)?;
     refuse_if_already_running(&pid_path)?;
     let my_pid = i32::try_from(std::process::id()).unwrap_or(i32::MAX);
     pidfile::write_pid(&pid_path, my_pid)?;
     info!(pid = my_pid, version = env!("CARGO_PKG_VERSION"), "raft daemon starting (foreground)");
     info!(server_url = %opts.server_url, profile = %opts.profile, "configuration loaded");
-    info!(home = %paths::home_dir()?.display(), "daemon home");
+    info!(home = %home.display(), "daemon home");
 
-    let state = build_initial_state(&opts)?;
+    let state = build_initial_state(&opts, &home);
     let state: Arc<dyn StateMgr> = Arc::new(state);
 
     // Ensure the agents directory exists before any agent:start arrives so
     // per-agent workspace creation is just a `create_dir_all` away.
-    if let Err(err) = ensure_agents_dir() {
+    let agents_dir = home.join("agents");
+    if let Err(err) = std::fs::create_dir_all(&agents_dir) {
         warn!(error = %err, "failed to create agents dir; agent starts will fail");
     }
 
@@ -348,23 +351,27 @@ async fn run_foreground(opts: DaemonOptions) -> Result<()> {
 }
 
 /// Construct the initial `DaemonState`, loading from disk if present.
-fn build_initial_state(opts: &DaemonOptions) -> Result<DaemonState> {
-    let workspace = paths::home_dir()?;
-    let state_path = paths::state_file()?;
+fn build_initial_state(opts: &DaemonOptions, home: &std::path::Path) -> DaemonState {
+    let state_path = home.join("state.json");
     if state_path.exists() {
         match DaemonState::load(&state_path) {
-            Ok(mut _loaded) => {
-                // Loaded; we'll re-use it but update the workspace if it moved.
-                // DaemonState is Clone but not mutable in a useful way here;
-                // for now, just start fresh to avoid stale server identity.
-                tracing::debug!("found existing state.json; ignoring for now");
+            Ok(mut loaded) => {
+                // Re-use the persisted state but clear server identity and
+                // update the workspace/profile in case the daemon was moved
+                // between profiles or directories.
+                loaded.server_id.clear();
+                loaded.server = None;
+                loaded.profile.clone_from(&opts.profile);
+                loaded.workspace.clone_from(&home.to_path_buf());
+                tracing::debug!("loaded existing state.json");
+                return loaded;
             }
             Err(err) => {
                 warn!(error = %err, "could not load existing state.json; starting fresh");
             }
         }
     }
-    Ok(DaemonState::new(
+    DaemonState::new(
         // The server_id is learned from the server once connected; use a
         // placeholder until then.
         String::new(),
@@ -375,8 +382,8 @@ fn build_initial_state(opts: &DaemonOptions) -> Result<DaemonState> {
             parameters: serde_json::json!({}),
         },
         opts.profile.clone(),
-        workspace,
-    ))
+        home.to_path_buf(),
+    )
 }
 
 /// Run the WebSocket event loop, reconnecting with exponential backoff until
@@ -414,6 +421,7 @@ async fn run_event_loop(
                     agents.clone(),
                     opts.server_url.clone(),
                     api_key.clone(),
+                    opts.profile.clone(),
                     &mut shutdown_rx,
                 )
                 .await
@@ -504,6 +512,7 @@ async fn drive_connection(
     agents: Arc<AgentProcessRegistry>,
     server_url: String,
     api_key: String,
+    profile: String,
     shutdown_rx: &mut watch::Receiver<bool>,
 ) -> Result<ConnectionOutcome> {
     let (write, mut read) = ws.split();
@@ -515,8 +524,33 @@ async fn drive_connection(
     // Send the daemon `ready` frame so the server knows who we are and which
     // runtimes are installed. Without this the raft UI shows "no detected
     // runtime" and refuses to schedule agent work onto this machine.
-    if let Err(err) = send_ready_frame(&outbound_tx).await {
+    let running: Vec<String> = agents.agent_ids();
+    if let Err(err) = send_ready_frame(&outbound_tx, &running).await {
         warn!(error = %err, "failed to send ready frame");
+    }
+
+    // Re-announce any agents that were persisted as running from a previous
+    // daemon session. This keeps the UI showing them as online after a daemon
+    // restart without waiting for the server to send new `agent:start` frames.
+    for (agent_id, payload) in state.running_agents() {
+        if agents.contains(&agent_id) {
+            tracing::debug!(agent_id = %agent_id, "agent already restored; skipping duplicate start");
+            continue;
+        }
+        info!(agent_id = %agent_id, "restoring persisted running agent");
+        if let Err(err) = start_agent(
+            &outbound_tx,
+            &agents,
+            &state,
+            &server_url,
+            &api_key,
+            &profile,
+            &payload,
+        )
+        .await
+        {
+            warn!(error = %err, agent_id = %agent_id, "failed to restore running agent");
+        }
     }
 
     let mut outcome = ConnectionOutcome::Disconnected;
@@ -541,6 +575,7 @@ async fn drive_connection(
                             &agents,
                             &server_url,
                             &api_key,
+                            &profile,
                         ).await {
                             warn!(error = %err, "error handling server message");
                         }
@@ -636,6 +671,7 @@ async fn handle_server_message(
     agents: &Arc<AgentProcessRegistry>,
     server_url: &str,
     api_key: &str,
+    profile: &str,
 ) -> Result<()> {
     let value: serde_json::Value = serde_json::from_str(text).context("parsing server JSON")?;
     let kind = value
@@ -679,144 +715,7 @@ async fn handle_server_message(
         // server routes future deliveries here. We do NOT spawn RustyCLI
         // eagerly; that happens on the first `agent:deliver`.
         "agent:start" => {
-            let agent_id = value
-                .get("agentId")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let launch_id = value.get("launchId").cloned();
-            let config = value.get("config").cloned().unwrap_or(serde_json::json!({}));
-            let runtime = config
-                .get("runtime")
-                .and_then(|v| v.as_str())
-                .unwrap_or("builtin");
-            let model = config
-                .get("model")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let provider_config = ProviderConfig::from_config(&config);
-            let provider_id = provider_config.provider_id.as_deref().unwrap_or("");
-            let provider_kind = provider_config.kind.as_deref().unwrap_or("");
-            let base_url = provider_config.base_url.as_deref().unwrap_or("");
-            let api_key_present = provider_config
-                .api_key
-                .as_deref()
-                .is_some_and(|s| !s.is_empty());
-
-            if provider_id.is_empty() && !api_key_present {
-                tracing::debug!(
-                    agent_id = %agent_id,
-                    config = %config,
-                    "agent:start config has no provider details; will rely on env fallback",
-                );
-            }
-
-            info!(
-                agent_id = %agent_id,
-                runtime = runtime,
-                model = model,
-                provider_id = provider_id,
-                provider_kind = provider_kind,
-                base_url_present = !base_url.is_empty(),
-                api_key_present = api_key_present,
-                "agent:start received",
-            );
-
-            let session_id_from_config = config
-                .get("sessionId")
-                .and_then(|v| v.as_str())
-                .map(str::to_string);
-
-            let home = match paths::home_dir() {
-                Ok(h) => h,
-                Err(err) => {
-                    warn!(error = %err, "could not resolve daemon home; agent start fails");
-                    send_agent_status(outbound, &agent_id, "inactive", launch_id.as_ref()).await?;
-                    return Ok(());
-                }
-            };
-
-            match AgentProcess::from_start(&agent_id, &config, launch_id.as_ref(), &home) {
-                Ok(mut process) => {
-                    if let Some(sid) = session_id_from_config {
-                        process.session_id = Some(sid);
-                    }
-                    let session_id = process
-                        .session_id
-                        .clone()
-                        .unwrap_or_else(|| format!("sess_{}", uuid::Uuid::new_v4()));
-                    process.session_id = Some(session_id.clone());
-
-                    // Mint a per-agent raft credential so we can POST chat
-                    // replies via /internal/agent-api/send. This is a
-                    // best-effort step: if it fails we still install the
-                    // agent (it can think via RustyCLI) but replies won't
-                    // appear in chat.
-                    match mint_runner_credential(
-                        server_url,
-                        api_key,
-                        &agent_id,
-                        &process.runtime,
-                    )
-                    .await
-                    {
-                        Ok(cred) => {
-                            info!(
-                                agent_id = %agent_id,
-                                credential_id = ?cred.credential_id,
-                                "minted raft runner credential",
-                            );
-                            process.agent_credential_key = Some(cred.api_key);
-                            process.agent_credential_id = cred.credential_id;
-                        }
-                        Err(err) => {
-                            warn!(
-                                error = %err,
-                                agent_id = %agent_id,
-                                "failed to mint raft runner credential; \
-                                 agent will run but cannot post chat replies",
-                            );
-                        }
-                    }
-
-                    let idle_client_seq = process.next_activity_client_seq();
-                    agents.install(process);
-
-                    // Tell the server we're ready to receive deliveries.
-                    let mut session_payload = serde_json::json!({
-                        "type": "agent:session",
-                        "agentId": agent_id,
-                        "sessionId": session_id,
-                    });
-                    if let Some(lid) = launch_id.as_ref() {
-                        session_payload["launchId"] = lid.clone();
-                    }
-                    send_json(outbound, session_payload).await?;
-                    send_agent_status(outbound, &agent_id, "active", launch_id.as_ref()).await?;
-                    send_agent_activity(
-                        outbound,
-                        &agent_id,
-                        "idle",
-                        "Agent ready",
-                        launch_id.as_ref(),
-                        idle_client_seq,
-                    )
-                    .await?;
-                }
-                Err(err) => {
-                    warn!(error = %err, agent_id = %agent_id, "failed to install agent process");
-                    send_agent_status(outbound, &agent_id, "inactive", launch_id.as_ref()).await?;
-                    send_agent_activity(
-                        outbound,
-                        &agent_id,
-                        "offline",
-                        &format!("Failed to start: {err}"),
-                        launch_id.as_ref(),
-                        0,
-                    )
-                    .await?;
-                }
-            }
+            start_agent(outbound, agents, state, server_url, api_key, profile, &value).await?;
         }
 
         // Server delivered a chat message to an agent. We ack immediately so
@@ -902,6 +801,125 @@ async fn handle_server_message(
             });
         }
 
+        "agent:workspace:list" => {
+            let agent_id = value
+                .get("agentId")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let dir_path = value
+                .get("dirPath")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let include_hidden = value
+                .get("includeHidden")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+
+            let workspace = agents
+                .with(agent_id, |p| p.workspace.clone())
+                .unwrap_or_else(|| {
+                    paths::home_dir_for_profile(profile)
+                        .map(|h| h.join("agents").join(agent_id))
+                        .unwrap_or_default()
+                });
+
+            let files = list_workspace_files(&workspace, dir_path, include_hidden);
+            let mut payload = serde_json::Map::new();
+            payload.insert("type".to_string(), serde_json::json!("agent:workspace:file_tree"));
+            payload.insert("agentId".to_string(), serde_json::json!(agent_id));
+            payload.insert("files".to_string(), serde_json::json!(files));
+            if !dir_path.is_empty() {
+                payload.insert("dirPath".to_string(), serde_json::json!(dir_path));
+            }
+            payload.insert("includeHidden".to_string(), serde_json::json!(include_hidden));
+            send_json(outbound, serde_json::Value::Object(payload)).await?;
+        }
+
+        "agent:workspace:read" => {
+            let agent_id = value
+                .get("agentId")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let file_path = value
+                .get("path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let request_id = value.get("requestId").cloned();
+
+            let workspace = agents
+                .with(agent_id, |p| p.workspace.clone())
+                .unwrap_or_else(|| {
+                    paths::home_dir_for_profile(profile)
+                        .map(|h| h.join("agents").join(agent_id))
+                        .unwrap_or_default()
+                });
+
+            let result = read_workspace_file(&workspace, file_path);
+            let mut payload = serde_json::Map::new();
+            payload.insert("type".to_string(), serde_json::json!("agent:workspace:file_content"));
+            payload.insert("agentId".to_string(), serde_json::json!(agent_id));
+            if let Some(rid) = request_id {
+                payload.insert("requestId".to_string(), rid);
+            }
+            match result {
+                Ok(ReadResult::Text { content, size }) => {
+                    payload.insert("content".to_string(), serde_json::json!(content));
+                    payload.insert("binary".to_string(), serde_json::json!(false));
+                    payload.insert("size".to_string(), serde_json::json!(size));
+                    payload.insert("encoding".to_string(), serde_json::json!("utf-8"));
+                }
+                Ok(ReadResult::Binary { size }) => {
+                    payload.insert("content".to_string(), serde_json::Value::Null);
+                    payload.insert("binary".to_string(), serde_json::json!(true));
+                    payload.insert("size".to_string(), serde_json::json!(size));
+                }
+                Err(_) => {
+                    payload.insert("content".to_string(), serde_json::Value::Null);
+                    payload.insert("binary".to_string(), serde_json::json!(false));
+                    payload.insert("size".to_string(), serde_json::json!(0));
+                }
+            }
+            send_json(outbound, serde_json::Value::Object(payload)).await?;
+        }
+
+        "agent:activity_probe" => {
+            // Server is checking if the agent is still alive. Respond with an
+            // online activity so the UI shows the agent as available and the
+            // probe is acknowledged.
+            let agent_id = value
+                .get("agentId")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let probe_id = value
+                .get("probeId")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if agent_id.is_empty() || probe_id.is_empty() {
+                tracing::debug!("ignoring agent:activity_probe without agentId or probeId");
+            } else if let Some((client_seq, launch_id)) = agents.with(agent_id, |p| {
+                (p.next_activity_client_seq(), p.launch_id.as_ref().map(|s| serde_json::json!(s)))
+            }) {
+                let launch_ref = launch_id.as_ref();
+                if let Err(err) = send_agent_activity(
+                    outbound,
+                    agent_id,
+                    "online",
+                    "online",
+                    "Agent ready",
+                    "idle",
+                    launch_ref,
+                    client_seq,
+                    Some(probe_id),
+                )
+                .await
+                {
+                    warn!(error = %err, agent_id = %agent_id, "failed to respond to activity probe");
+                }
+            } else {
+                tracing::debug!(agent_id = %agent_id, "ignoring agent:activity_probe for unknown agent");
+            }
+        }
+
         "agent:stop" => {
             let agent_id = value
                 .get("agentId")
@@ -910,6 +928,10 @@ async fn handle_server_message(
                 .to_string();
             let launch_id = value.get("launchId").cloned();
             info!(agent_id = %agent_id, "agent:stop received");
+            state.remove_running_agent(&agent_id);
+            if let Err(err) = state.save() {
+                warn!(error = %err, agent_id = %agent_id, "failed to persist agent stop");
+            }
             if agents.remove(&agent_id).is_some() {
                 info!(agent_id = %agent_id, "removed agent from registry");
             }
@@ -998,6 +1020,161 @@ async fn handle_server_message(
     Ok(())
 }
 
+/// Install a running agent from the server's `agent:start` payload and announce
+/// it as online. Also persists the payload so the agent can be restored on a
+/// future daemon restart.
+async fn start_agent(
+    outbound: &mpsc::Sender<WsMessage>,
+    agents: &Arc<AgentProcessRegistry>,
+    state: &Arc<dyn StateMgr>,
+    server_url: &str,
+    api_key: &str,
+    profile: &str,
+    value: &serde_json::Value,
+) -> Result<()> {
+    let agent_id = value
+        .get("agentId")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    if agent_id.is_empty() {
+        warn!("agent:start payload missing agentId; skipping");
+        return Ok(());
+    }
+    let launch_id = value.get("launchId").cloned();
+    let config = value.get("config").cloned().unwrap_or(serde_json::json!({}));
+    let runtime = config
+        .get("runtime")
+        .and_then(|v| v.as_str())
+        .unwrap_or("builtin");
+    let model = config
+        .get("model")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let provider_config = ProviderConfig::from_config(&config);
+    let provider_id = provider_config.provider_id.as_deref().unwrap_or("");
+    let provider_kind = provider_config.kind.as_deref().unwrap_or("");
+    let base_url = provider_config.base_url.as_deref().unwrap_or("");
+    let api_key_present = provider_config
+        .api_key
+        .as_deref()
+        .is_some_and(|s| !s.is_empty());
+
+    if provider_id.is_empty() && !api_key_present {
+        tracing::debug!(
+            agent_id = %agent_id,
+            config = %config,
+            "agent:start config has no provider details; will rely on env fallback",
+        );
+    }
+
+    info!(
+        agent_id = %agent_id,
+        runtime = runtime,
+        model = model,
+        provider_id = provider_id,
+        provider_kind = provider_kind,
+        base_url_present = !base_url.is_empty(),
+        api_key_present = api_key_present,
+        "agent:start received",
+    );
+
+    let session_id_from_config = config
+        .get("sessionId")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+
+    let home = match paths::home_dir_for_profile(profile) {
+        Ok(h) => h,
+        Err(err) => {
+            warn!(error = %err, "could not resolve daemon home; agent start fails");
+            send_agent_status(outbound, &agent_id, "inactive", launch_id.as_ref()).await?;
+            return Ok(());
+        }
+    };
+
+    match AgentProcess::from_start(&agent_id, &config, launch_id.as_ref(), &home) {
+        Ok(mut process) => {
+            if let Some(sid) = session_id_from_config {
+                process.session_id = Some(sid);
+            }
+            let session_id = process
+                .session_id
+                .clone()
+                .unwrap_or_else(|| format!("sess_{}", uuid::Uuid::new_v4()));
+            process.session_id = Some(session_id.clone());
+
+            match mint_runner_credential(server_url, api_key, &agent_id, &process.runtime).await {
+                Ok(cred) => {
+                    info!(
+                        agent_id = %agent_id,
+                        credential_id = ?cred.credential_id,
+                        "minted raft runner credential",
+                    );
+                    process.agent_credential_key = Some(cred.api_key);
+                    process.agent_credential_id = cred.credential_id;
+                }
+                Err(err) => {
+                    warn!(
+                        error = %err,
+                        agent_id = %agent_id,
+                        "failed to mint raft runner credential; \
+                         agent will run but cannot post chat replies",
+                    );
+                }
+            }
+
+            let idle_client_seq = process.next_activity_client_seq();
+            agents.install(process);
+
+            state.set_running_agent(&agent_id, value.clone());
+            if let Err(err) = state.save() {
+                warn!(error = %err, agent_id = %agent_id, "failed to persist running agent");
+            }
+
+            let mut session_payload = serde_json::json!({
+                "type": "agent:session",
+                "agentId": agent_id,
+                "sessionId": session_id,
+            });
+            if let Some(lid) = launch_id.as_ref() {
+                session_payload["launchId"] = lid.clone();
+            }
+            send_json(outbound, session_payload).await?;
+            send_agent_status(outbound, &agent_id, "active", launch_id.as_ref()).await?;
+            send_agent_activity(
+                outbound,
+                &agent_id,
+                "online",
+                "online",
+                "Agent ready",
+                "idle",
+                launch_id.as_ref(),
+                idle_client_seq,
+                None,
+            )
+            .await?;
+        }
+        Err(err) => {
+            warn!(error = %err, agent_id = %agent_id, "failed to install agent process");
+            send_agent_status(outbound, &agent_id, "inactive", launch_id.as_ref()).await?;
+            send_agent_activity(
+                outbound,
+                &agent_id,
+                "offline",
+                "offline",
+                &format!("Failed to start: {err}"),
+                "runtime_error",
+                launch_id.as_ref(),
+                0,
+                None,
+            )
+            .await?;
+        }
+    }
+    Ok(())
+}
+
 /// Forward an agent-bound message into the existing agent manager.
 ///
 /// For now we extract a debug log; full agent routing (looking up the
@@ -1009,6 +1186,148 @@ fn dispatch_to_agent(value: &serde_json::Value, _state: &Arc<dyn StateMgr>) {
         .and_then(|v| v.as_str())
         .unwrap_or("?");
     info!(agent_id = agent_id, "agent dispatch (scaffold)");
+}
+
+/// Result of reading a workspace file for `agent:workspace:read`.
+enum ReadResult {
+    Text { content: String, size: u64 },
+    Binary { size: u64 },
+}
+
+const TEXT_MAX_BYTES: u64 = 1_048_576; // 1 MB
+
+/// Read a file from an agent workspace for the `agent:workspace:read` request.
+/// Returns text for known text extensions, or a binary marker for other files.
+/// Errors are returned for access outside the workspace, directories, or I/O
+/// failures.
+fn read_workspace_file(
+    workspace: &std::path::Path,
+    file_path: &str,
+) -> Result<ReadResult> {
+    if file_path.is_empty() {
+        anyhow::bail!("empty file path");
+    }
+
+    let full_path = workspace.join(file_path).canonicalize()?;
+    let workspace_canon = workspace.canonicalize().unwrap_or_else(|_| workspace.to_path_buf());
+    let prefix = format!("{}{sep}", workspace_canon.display(), sep = std::path::MAIN_SEPARATOR);
+    if !full_path.starts_with(&prefix) && full_path != workspace_canon {
+        anyhow::bail!("access denied: path escapes workspace");
+    }
+
+    let metadata = std::fs::metadata(&full_path)?;
+    if metadata.is_dir() {
+        anyhow::bail!("cannot read a directory");
+    }
+
+    let extension = full_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_lowercase)
+        .unwrap_or_default();
+    let is_text = extension.is_empty()
+        || matches!(
+            extension.as_str(),
+            "md" | "txt" | "json" | "js" | "ts" | "jsx" | "tsx" | "yaml" | "yml"
+                | "toml" | "log" | "csv" | "xml" | "html" | "css" | "sh" | "py"
+                | "rs"
+        );
+
+    if is_text {
+        if metadata.len() > TEXT_MAX_BYTES {
+            anyhow::bail!("text file too large");
+        }
+        let content = std::fs::read_to_string(&full_path)?;
+        Ok(ReadResult::Text {
+            content,
+            size: metadata.len(),
+        })
+    } else {
+        Ok(ReadResult::Binary {
+            size: metadata.len(),
+        })
+    }
+}
+
+/// List the files/directories inside an agent workspace for the
+/// `agent:workspace:list` request. Returns entries relative to the agent
+/// workspace root. Skips `node_modules`, filters hidden entries based on
+/// `include_hidden`, and refuses paths that escape the workspace.
+fn list_workspace_files(
+    workspace: &std::path::Path,
+    dir_path: &str,
+    include_hidden: bool,
+) -> Vec<serde_json::Value> {
+    let target_dir = if dir_path.is_empty() {
+        workspace.to_path_buf()
+    } else {
+        let resolved = workspace.join(dir_path).canonicalize().unwrap_or_default();
+        let workspace_canon = workspace.canonicalize().unwrap_or_else(|_| workspace.to_path_buf());
+        let prefix = format!("{}{sep}", workspace_canon.display(), sep = std::path::MAIN_SEPARATOR);
+        if !resolved.starts_with(&prefix) && resolved != workspace_canon {
+            return Vec::new();
+        }
+        resolved
+    };
+
+    let mut entries = match std::fs::read_dir(&target_dir) {
+        Ok(iter) => iter.filter_map(std::result::Result::ok).collect::<Vec<_>>(),
+        Err(_) => return Vec::new(),
+    };
+
+    entries.sort_by(|a, b| {
+        let a_dir = a.file_type().is_ok_and(|t| t.is_dir());
+        let b_dir = b.file_type().is_ok_and(|t| t.is_dir());
+        match (a_dir, b_dir) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => a.file_name().cmp(&b.file_name()),
+        }
+    });
+
+    let mut out = Vec::new();
+    for entry in entries {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        let is_hidden = name_str.starts_with('.');
+        if name_str == "node_modules" {
+            continue;
+        }
+        if is_hidden && !include_hidden {
+            continue;
+        }
+
+        let full_path = entry.path();
+        let relative = full_path
+            .strip_prefix(workspace)
+            .map_or_else(|_| full_path.clone(), std::path::Path::to_path_buf);
+        let is_directory = entry.file_type().is_ok_and(|t| t.is_dir());
+        let size = if is_directory {
+            0
+        } else {
+            std::fs::metadata(&full_path)
+                .map_or(0, |m| m.len())
+        };
+        let modified_at = std::fs::metadata(&full_path)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| chrono::DateTime::from_timestamp(
+                i64::try_from(t.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs()).ok()?,
+                0,
+            ))
+            .map(|dt| dt.to_rfc3339())
+            .unwrap_or_default();
+
+        out.push(serde_json::json!({
+            "name": name_str.to_string(),
+            "path": relative.display().to_string(),
+            "isDirectory": is_directory,
+            "size": size,
+            "modifiedAt": modified_at,
+            "isHidden": is_hidden,
+        }));
+    }
+    out
 }
 
 /// Send an `agent:status` frame (`active` / `inactive` / `error`).
@@ -1032,13 +1351,17 @@ async fn send_agent_status(
 /// `AgentProcessManager.broadcastActivity` in npm but stripped of the
 /// trajectory / heartbeat machinery — we just need enough to make the UI
 /// show "working" / "idle" honestly.
+#[allow(clippy::too_many_arguments)]
 async fn send_agent_activity(
     outbound: &mpsc::Sender<WsMessage>,
     agent_id: &str,
     activity: &str,
+    activity_kind: &str,
     detail: &str,
+    detail_kind: &str,
     launch_id: Option<&serde_json::Value>,
     client_seq: u64,
+    probe_id: Option<&str>,
 ) -> Result<()> {
     let launch_id_str = launch_id.and_then(|v| v.as_str()).unwrap_or("legacy");
     let producer_fact_id = format!("daemon_activity:{agent_id}:{launch_id_str}:{client_seq}");
@@ -1046,17 +1369,17 @@ async fn send_agent_activity(
     payload.insert("type".to_string(), serde_json::json!("agent:activity"));
     payload.insert("agentId".to_string(), serde_json::json!(agent_id));
     payload.insert("activity".to_string(), serde_json::json!(activity));
-    payload.insert("activityKind".to_string(), serde_json::json!(activity));
+    payload.insert("activityKind".to_string(), serde_json::json!(activity_kind));
     payload.insert("detail".to_string(), serde_json::json!(detail));
-    payload.insert("detailKind".to_string(), serde_json::json!("other"));
+    payload.insert("detailKind".to_string(), serde_json::json!(detail_kind));
     payload.insert(
         "entries".to_string(),
         serde_json::json!([{
             "kind": "status",
             "activity": activity,
-            "activityKind": activity,
+            "activityKind": activity_kind,
             "detail": detail,
-            "detailKind": "other",
+            "detailKind": detail_kind,
         }]),
     );
     payload.insert("clientSeq".to_string(), serde_json::json!(client_seq));
@@ -1066,6 +1389,9 @@ async fn send_agent_activity(
     );
     if let Some(lid) = launch_id {
         payload.insert("launchId".to_string(), lid.clone());
+    }
+    if let Some(pid) = probe_id {
+        payload.insert("probeId".to_string(), serde_json::json!(pid));
     }
     send_json(outbound, serde_json::Value::Object(payload)).await
 }
@@ -1081,7 +1407,6 @@ fn prepare_delivery_prompt(
     agent_id: &str,
     name: &str,
     description: &str,
-    workspace: &std::path::Path,
     delivery: &serde_json::Value,
 ) -> Option<String> {
     let msg = delivery.get("message")?;
@@ -1142,42 +1467,12 @@ fn prepare_delivery_prompt(
         .and_then(|v| v.as_str())
         .unwrap_or("unknown");
 
-    // Read the agent's memory index. Keep the prompt reasonably bounded by
-    // truncating very large MEMORY.md files; the agent can read additional
-    // notes on demand via the runtime if needed.
-    let memory_path = workspace.join("MEMORY.md");
-    let memory_block = match std::fs::read_to_string(&memory_path) {
-        Ok(text) => {
-            const MAX_MEMORY_LEN: usize = 8_000;
-            if text.len() > MAX_MEMORY_LEN {
-                format!(
-                    "## MEMORY.md (truncated)\n{}\n\n...(truncated; full file is at {})",
-                    &text[..MAX_MEMORY_LEN],
-                    memory_path.display()
-                )
-            } else {
-                format!("## MEMORY.md\n{text}")
-            }
-        }
-        Err(err) => {
-            tracing::debug!(
-                agent_id = %agent_id,
-                path = %memory_path.display(),
-                error = %err,
-                "no MEMORY.md found for agent; using minimal context"
-            );
-            String::new()
-        }
-    };
-
-    let context_header = if memory_block.is_empty() {
-        format!("You are {name}. {description}\n\nBelow is your memory/context (none yet).\n")
-    } else {
-        format!("You are {name}. {description}\n\nBelow is your memory/context. Read it first, then handle the message.\n\n{memory_block}\n")
-    };
+    // RustyCLI reads MEMORY.md and notes/ from the workspace automatically,
+    // so the daemon no longer injects them into the prompt.
+    let context_header = format!("You are {name}. {description}\n\n");
 
     Some(format!(
-        "{context_header}New message received:\n\n[target={target} msg={msg_id} time={time} type={sender_type}] @{sender_name}: {content}\n\nRespond as appropriate. Only reply if you are directly addressed, this is a DM, or you have an explicit task. If you choose not to respond, output exactly `{NO_REPLY_MARKER}` and nothing else. Complete all your work before stopping."
+        "{context_header}New message received:\n\n[target={target} msg={msg_id} time={time} type={sender_type}] @{sender_name}: {content}\n\nYou are in a team channel. If this message is addressed to you, the team, the channel, or falls within your role, respond helpfully and concisely. Only output `{NO_REPLY_MARKER}` for messages that are clearly irrelevant, private side-conversations, or do not require your input. Complete all your work before stopping."
     ))
 }
 
@@ -1214,11 +1509,16 @@ async fn run_agent_turn(
     // Decide whether to respond and build a prompt that mirrors the npm
     // daemon's stdin format (target, sender, context) plus an explicit
     // instruction to only reply when addressed.
-    let Some(prompt) = prepare_delivery_prompt(agent_id, &process.name, &process.description, &process.workspace, delivery) else {
+    let Some(prompt) = prepare_delivery_prompt(agent_id, &process.name, &process.description, delivery) else {
         return;
     };
 
-    if let Err(err) = send_agent_activity(outbound, agent_id, "working", "Thinking…", launch_ref, process.next_activity_client_seq()).await {
+    // Serialize turns for this agent. RustyCLI keeps a SQLite task registry
+    // in the workspace; concurrent invocations for the same agent collide with
+    // "database is locked" errors.
+    let _turn_guard = process.turn_lock.lock().await;
+
+    if let Err(err) = send_agent_activity(outbound, agent_id, "working", "working", "Thinking…", "message_received", launch_ref, process.next_activity_client_seq(), None).await {
         warn!(error = %err, "failed to broadcast working activity");
     }
 
@@ -1238,7 +1538,7 @@ async fn run_agent_turn(
             }
 
             if let Err(err) =
-                send_agent_activity(outbound, agent_id, "idle", "Idle", launch_ref, process.next_activity_client_seq()).await
+                send_agent_activity(outbound, agent_id, "online", "online", "Idle", "idle", launch_ref, process.next_activity_client_seq(), None).await
             {
                 warn!(error = %err, "failed to broadcast idle activity");
             }
@@ -1249,9 +1549,12 @@ async fn run_agent_turn(
                 outbound,
                 agent_id,
                 "error",
+                "error",
                 &format!("RustyCLI error: {err}"),
+                "runtime_error",
                 launch_ref,
                 process.next_activity_client_seq(),
+                None,
             )
             .await;
         }
@@ -1337,7 +1640,12 @@ async fn send_json(outbound: &mpsc::Sender<WsMessage>, value: serde_json::Value)
 ///
 /// Mirrors `DaemonCore.handleConnect()` in the npm daemon at
 /// `chunk-URPIDKXK.js:22330`.
-async fn send_ready_frame(outbound: &mpsc::Sender<WsMessage>) -> Result<()> {
+/// Send the daemon `ready` frame, advertising installed runtimes and the set
+/// of agents that were already running before this connection.
+async fn send_ready_frame(
+    outbound: &mpsc::Sender<WsMessage>,
+    running_agents: &[String],
+) -> Result<()> {
     let runtimes = detect_runtimes();
     info!(runtimes = ?runtimes, "sending ready frame");
 
@@ -1350,7 +1658,7 @@ async fn send_ready_frame(outbound: &mpsc::Sender<WsMessage>) -> Result<()> {
             "workspace:files",
         ],
         "runtimes": runtimes,
-        "runningAgents": Vec::<String>::new(),
+        "runningAgents": running_agents,
         "hostname": hostname_str(),
         "os": format!("{} {}", std::env::consts::OS, std::env::consts::ARCH),
         "daemonVersion": env!("CARGO_PKG_VERSION"),
@@ -1482,8 +1790,8 @@ fn computer_version() -> Option<String> {
 /// # Errors
 ///
 /// Returns an error if no daemon is running or it fails to terminate.
-pub async fn stop() -> Result<()> {
-    let pid_path = paths::pid_file()?;
+pub async fn stop(profile: &str) -> Result<()> {
+    let pid_path = paths::pid_file_for_profile(profile)?;
     let pid = pidfile::read_pid(&pid_path)?
         .ok_or_else(|| anyhow::anyhow!("daemon not running"))?;
 
@@ -1528,8 +1836,8 @@ pub async fn stop() -> Result<()> {
 /// # Errors
 ///
 /// Returns an error if the PID file cannot be read.
-pub fn status() -> Result<StatusReport> {
-    let pid_path = paths::pid_file()?;
+pub fn status(profile: &str) -> Result<StatusReport> {
+    let pid_path = paths::pid_file_for_profile(profile)?;
     match pidfile::read_pid(&pid_path)? {
         None => Ok(StatusReport::NotConfigured),
         Some(pid) if pidfile::is_alive(pid) => Ok(StatusReport::Running(pid)),
@@ -1547,7 +1855,7 @@ pub fn status() -> Result<StatusReport> {
 /// Propagates errors from [`start`]; stop failures other than
 /// "not running" are also propagated.
 pub async fn restart(opts: DaemonOptions) -> Result<StartOutcome> {
-    if let Err(err) = stop().await {
+    if let Err(err) = stop(&opts.profile).await {
         let msg = err.to_string();
         if !msg.contains("not running") {
             return Err(err);
@@ -1596,7 +1904,7 @@ fn spawn_signal_handler(shutdown_tx: watch::Sender<bool>) {
 /// go to stdout with a friendly format. Otherwise they go to the daemon log
 /// file. Uses `try_init` so the first initialiser wins; this is safe because
 /// only one tracing setup runs per process.
-fn init_tracing() -> Result<()> {
+fn init_tracing(profile: &str) -> Result<()> {
     use tracing_subscriber::fmt;
 
     let filter = EnvFilter::try_from_default_env()
@@ -1611,7 +1919,7 @@ fn init_tracing() -> Result<()> {
         return Ok(());
     }
 
-    let path = paths::log_file()?;
+    let path = paths::log_file_for_profile(profile)?;
     #[cfg(unix)]
     let file = {
         use std::os::unix::fs::OpenOptionsExt;
@@ -1875,7 +2183,6 @@ mod tests {
 
     #[test]
     fn prepare_delivery_prompt_skips_self_echo() {
-        let tmp = tempfile::tempdir().unwrap();
         let agent_id = "ag_123";
         let delivery = serde_json::json!({
             "message": {
@@ -1886,12 +2193,11 @@ mod tests {
                 "channel_name": "general",
             }
         });
-        assert!(prepare_delivery_prompt(agent_id, "Agent", "A test agent", tmp.path(), &delivery).is_none());
+        assert!(prepare_delivery_prompt(agent_id, "Agent", "A test agent", &delivery).is_none());
     }
 
     #[test]
     fn prepare_delivery_prompt_skips_bot_in_public_channel() {
-        let tmp = tempfile::tempdir().unwrap();
         let delivery = serde_json::json!({
             "message": {
                 "content": "hello",
@@ -1902,12 +2208,11 @@ mod tests {
                 "channel_name": "general",
             }
         });
-        assert!(prepare_delivery_prompt("ag_123", "Agent", "A test agent", tmp.path(), &delivery).is_none());
+        assert!(prepare_delivery_prompt("ag_123", "Agent", "A test agent", &delivery).is_none());
     }
 
     #[test]
     fn prepare_delivery_prompt_allows_bot_in_dm() {
-        let tmp = tempfile::tempdir().unwrap();
         let delivery = serde_json::json!({
             "message": {
                 "content": "hello",
@@ -1918,14 +2223,13 @@ mod tests {
                 "sender_name": "other-bot",
             }
         });
-        let prompt = prepare_delivery_prompt("ag_123", "Agent", "A test agent", tmp.path(), &delivery).unwrap();
+        let prompt = prepare_delivery_prompt("ag_123", "Agent", "A test agent", &delivery).unwrap();
         assert!(prompt.contains("hello"));
         assert!(prompt.contains("New message received:"));
     }
 
     #[test]
     fn prepare_delivery_prompt_allows_human_in_channel() {
-        let tmp = tempfile::tempdir().unwrap();
         let delivery = serde_json::json!({
             "message": {
                 "content": "can you help?",
@@ -1936,17 +2240,16 @@ mod tests {
                 "channel_name": "general",
             }
         });
-        let prompt = prepare_delivery_prompt("ag_123", "Agent", "A test agent", tmp.path(), &delivery).unwrap();
+        let prompt = prepare_delivery_prompt("ag_123", "Agent", "A test agent", &delivery).unwrap();
         assert!(prompt.contains("can you help?"));
         assert!(prompt.contains("@alice"));
         assert!(prompt.contains("#general"));
-        assert!(prompt.contains("Only reply if you are directly addressed"));
+        assert!(prompt.contains("You are in a team channel"));
         assert!(prompt.contains("NO_REPLY"));
     }
 
     #[test]
     fn prepare_delivery_prompt_formats_payload_like_npm() {
-        let tmp = tempfile::tempdir().unwrap();
         let delivery = serde_json::json!({
             "message": {
                 "message_id": "msg_abc",
@@ -1959,29 +2262,10 @@ mod tests {
                 "channel_name": "dev",
             }
         });
-        let prompt = prepare_delivery_prompt("ag_123", "Coder", "Fixes bugs", tmp.path(), &delivery).unwrap();
+        let prompt = prepare_delivery_prompt("ag_123", "Coder", "Fixes bugs", &delivery).unwrap();
         assert!(prompt.contains("You are Coder. Fixes bugs"));
         assert!(prompt.contains("[target=#dev msg=msg_abc"));
         assert!(prompt.contains("type=human] @bob: fix the bug"));
-        assert!(prompt.contains("Respond as appropriate"));
-    }
-
-    #[test]
-    fn prepare_delivery_prompt_includes_memory_md() {
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(tmp.path().join("MEMORY.md"), "# Project Foo\n\nUse Rust.").unwrap();
-        let delivery = serde_json::json!({
-            "message": {
-                "content": "what stack?",
-                "sender_id": "user_1",
-                "sender_type": "human",
-                "sender_name": "bob",
-                "channel_type": "channel",
-                "channel_name": "dev",
-            }
-        });
-        let prompt = prepare_delivery_prompt("ag_123", "Coder", "Fixes bugs", tmp.path(), &delivery).unwrap();
-        assert!(prompt.contains("# Project Foo"));
-        assert!(prompt.contains("what stack?"));
+        assert!(prompt.contains("You are in a team channel"));
     }
 }

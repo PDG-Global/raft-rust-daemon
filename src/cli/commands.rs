@@ -94,11 +94,23 @@ pub enum DaemonCommand {
         foreground: bool,
     },
     /// Stop the daemon.
-    Stop,
+    Stop {
+        /// The profile to stop.
+        #[arg(short, long, default_value = "default")]
+        profile: String,
+    },
     /// Restart the daemon.
-    Restart,
+    Restart {
+        /// The profile to restart.
+        #[arg(short, long, default_value = "default")]
+        profile: String,
+    },
     /// Show daemon status.
-    Status,
+    Status {
+        /// The profile to check.
+        #[arg(short, long, default_value = "default")]
+        profile: String,
+    },
 }
 
 /// Agent commands.
@@ -458,16 +470,16 @@ pub async fn execute_command(command: &CliCommand) -> Result<()> {
                     }
                 }
             }
-            DaemonCommand::Stop => {
-                runner::stop().await?;
+            DaemonCommand::Stop { profile } => {
+                runner::stop(profile).await?;
             }
-            DaemonCommand::Restart => {
+            DaemonCommand::Restart { profile } => {
                 // Restart needs the same opts as start; without re-parsing
                 // we can only stop. Print guidance.
-                println!("Use `raft-daemon stop` then `raft-daemon start ...` to restart with updated options.");
+                println!("Use `raft-daemon stop --profile {profile}` then `raft-daemon start --profile {profile} ...` to restart with updated options.");
                 println!("(Restart reuses server URL / API key from the previous invocation, which is not yet stored.)");
             }
-            DaemonCommand::Status => match runner::status()? {
+            DaemonCommand::Status { profile } => match runner::status(profile)? {
                 StatusReport::Running(pid) => {
                     println!("raft daemon: {pid}");
                 }

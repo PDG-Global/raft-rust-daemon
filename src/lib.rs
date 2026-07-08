@@ -75,3 +75,6 @@ pub mod cli;
 pub mod daemon;
 pub mod models;
 pub mod runtime;
+
+#[cfg(test)]
+pub(crate) mod test_env;

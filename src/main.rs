@@ -42,19 +42,25 @@ async fn main() -> Result<()> {
         }
         Some("stop") => {
             let command = CliCommand::Daemon {
-                command: DaemonCommand::Stop,
+                command: DaemonCommand::Stop {
+                    profile: args.profile(),
+                },
             };
             cli::commands::execute_command(&command).await?;
         }
         Some("status") => {
             let command = CliCommand::Daemon {
-                command: DaemonCommand::Status,
+                command: DaemonCommand::Status {
+                    profile: args.profile(),
+                },
             };
             cli::commands::execute_command(&command).await?;
         }
         Some("restart") => {
             let command = CliCommand::Daemon {
-                command: DaemonCommand::Restart,
+                command: DaemonCommand::Restart {
+                    profile: args.profile(),
+                },
             };
             cli::commands::execute_command(&command).await?;
         }

@@ -79,6 +79,12 @@ pub struct AgentProcess {
     /// the npm daemon's `nextActivityClientSeq` so the server can correlate
     /// lifecycle events and detect stale activity.
     pub activity_client_seq: Arc<AtomicU64>,
+    /// Lock that serializes RustyCLI turns for this agent. RustyCLI keeps a
+    /// per-agent task registry (SQLite) in the workspace; running two
+    /// invocations concurrently causes "database is locked" errors. The lock
+    /// is shared across clones so deliveries for the same agent queue up and
+    /// run one at a time.
+    pub turn_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl AgentProcess {
@@ -115,15 +121,30 @@ impl AgentProcess {
         let name = config
             .get("displayName")
             .or_else(|| config.get("name"))
+            .or_else(|| config.get("agentName"))
+            .or_else(|| config.get("title"))
             .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
             .unwrap_or(agent_id)
             .to_string();
         let description = config
             .get("description")
+            .or_else(|| config.get("role"))
+            .or_else(|| config.get("bio"))
             .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
             .unwrap_or("No role defined yet.")
             .to_string();
         let workspace = workspace_for(agent_id, home);
+
+    info!(
+        agent_id = agent_id,
+        name = %name,
+        description = %description,
+        "agent identity resolved from start config"
+    );
 
         // LLM provider block: `config.provider.{providerId, apiKey, baseUrl}`.
         // We parse defensively because the server may send the block under a
@@ -186,6 +207,7 @@ impl AgentProcess {
             agent_credential_key: None,
             agent_credential_id: None,
             activity_client_seq: Arc::new(AtomicU64::new(0)),
+            turn_lock: Arc::new(tokio::sync::Mutex::new(())),
         })
     }
 
@@ -504,38 +526,56 @@ pub fn setup_agent_memory(
     std::fs::create_dir_all(&notes_dir)
         .with_context(|| format!("creating notes dir {}", notes_dir.display()))?;
 
-    if !memory_path.exists() {
-        // Try to migrate from the npm daemon's legacy location.
-        if let Some(user_home) = user_home_dir_from_env() {
-            let legacy_dir = user_home.join(".slock").join("agents").join(agent_id);
-            let legacy_memory = legacy_dir.join("MEMORY.md");
-            if legacy_memory.exists() {
-                info!(
-                    agent_id = %agent_id,
-                    legacy = %legacy_memory.display(),
-                    dest = %memory_path.display(),
-                    "migrating MEMORY.md from legacy slock location"
-                );
-                std::fs::copy(&legacy_memory, &memory_path).with_context(|| {
-                    format!(
-                        "copying {} to {}",
-                        legacy_memory.display(),
-                        memory_path.display()
-                    )
-                })?;
+    if memory_path.exists() {
+        info!(
+            agent_id = %agent_id,
+            path = %memory_path.display(),
+            "MEMORY.md already exists"
+        );
+        return Ok(());
+    }
 
-                let legacy_notes = legacy_dir.join("notes");
-                if legacy_notes.is_dir() {
-                    migrate_notes_dir(&legacy_notes, &notes_dir)?;
-                }
+    // Try to migrate from the npm daemon's legacy location.
+    if let Some(user_home) = user_home_dir_from_env() {
+        let legacy_dir = user_home.join(".slock").join("agents").join(agent_id);
+        let legacy_memory = legacy_dir.join("MEMORY.md");
+        if legacy_memory.exists() {
+            info!(
+                agent_id = %agent_id,
+                legacy = %legacy_memory.display(),
+                dest = %memory_path.display(),
+                "migrating MEMORY.md from legacy slock location"
+            );
+            std::fs::copy(&legacy_memory, &memory_path).with_context(|| {
+                format!(
+                    "copying {} to {}",
+                    legacy_memory.display(),
+                    memory_path.display()
+                )
+            })?;
+
+            let legacy_notes = legacy_dir.join("notes");
+            if legacy_notes.is_dir() {
+                migrate_notes_dir(&legacy_notes, &notes_dir)?;
             }
         }
+    }
 
-        if !memory_path.exists() {
-            let initial = build_initial_memory_md(name, description);
-            std::fs::write(&memory_path, initial)
-                .with_context(|| format!("writing initial MEMORY.md {}", memory_path.display()))?;
-        }
+    if memory_path.exists() {
+        info!(
+            agent_id = %agent_id,
+            path = %memory_path.display(),
+            "MEMORY.md ready after migration"
+        );
+    } else {
+        let initial = build_initial_memory_md(name, description);
+        std::fs::write(&memory_path, initial)
+            .with_context(|| format!("writing initial MEMORY.md {}", memory_path.display()))?;
+        info!(
+            agent_id = %agent_id,
+            path = %memory_path.display(),
+            "created initial MEMORY.md"
+        );
     }
 
     Ok(())
@@ -685,6 +725,8 @@ pub async fn run_one_turn(process: &AgentProcess, prompt: &str) -> Result<String
 
     let mut cmd = Command::new(&binary);
     cmd.arg("--headless")
+        .arg("--permissions")
+        .arg("bypass")
         .arg("--prompt")
         .arg(prompt)
         .arg("--cwd")
@@ -720,7 +762,13 @@ pub async fn run_one_turn(process: &AgentProcess, prompt: &str) -> Result<String
         preset = preset,
         base_url = ?process.llm_base_url.as_deref(),
         api_key_present = process.llm_api_key.is_some(),
+        prompt_len = prompt.len(),
         "spawning RustyCLI",
+    );
+    tracing::debug!(
+        agent_id = %process.agent_id,
+        prompt = %prompt,
+        "RustyCLI prompt",
     );
     let output = cmd
         .output()
@@ -763,6 +811,7 @@ pub type SharedAgentProcessRegistry = Arc<AgentProcessRegistry>;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_env::EnvGuard;
 
     #[test]
     fn workspace_for_namespaces_under_agents() {
@@ -859,13 +908,12 @@ mod tests {
 
     #[test]
     fn from_start_migrates_legacy_memory_md() {
-        // Set HOME to a temp dir so the legacy ~/.slock path is scoped to it.
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join("home");
         std::fs::create_dir_all(&home).unwrap();
-        let prior = std::env::var_os("HOME");
-        // Safety: tests in this module are run in-process; we restore HOME below.
-        unsafe { std::env::set_var("HOME", &home); }
+
+        // Scope HOME to this test so other tests don't see the legacy path.
+        let _home_guard = unsafe { EnvGuard::set("HOME", &home) };
 
         let agent_id = "ag_migrator";
         let legacy_agent = home.join(".slock").join("agents").join(agent_id);
@@ -876,14 +924,6 @@ mod tests {
 
         let daemon_home = tmp.path().join("raft-daemon");
         let p = AgentProcess::from_start(agent_id, &serde_json::json!({}), None, &daemon_home).unwrap();
-
-        // Restore HOME before asserting so a panic doesn't leak the override.
-        unsafe {
-            match prior {
-                Some(v) => std::env::set_var("HOME", v),
-                None => std::env::remove_var("HOME"),
-            }
-        }
 
         assert_eq!(std::fs::read_to_string(p.workspace.join("MEMORY.md")).unwrap(), "# Legacy memory\n");
         assert!(p.workspace.join("notes").join("legacy-note.md").exists());
@@ -922,6 +962,7 @@ mod tests {
             agent_credential_key: None,
             agent_credential_id: None,
             activity_client_seq: Arc::new(AtomicU64::new(0)),
+            turn_lock: Arc::new(tokio::sync::Mutex::new(())),
         };
         reg.install(p);
         assert!(reg.contains("ag_a"));
@@ -1005,13 +1046,11 @@ mod tests {
     fn resolve_does_not_default_base_url_for_kimi_preset() {
         // Rusty's --preset kimi knows its own base URL (https://api.kimi.com/coding/v1/).
         // We must NOT inject a different default or we'd override the preset.
-        // SAFETY: tests in this module run single-threaded via --test-threads=1.
-        unsafe {
-            std::env::remove_var("KIMI_API_KEY");
-            std::env::remove_var("MOONSHOT_API_KEY");
-            std::env::remove_var("RAFT_LLM_API_KEY");
-            std::env::remove_var("RAFT_LLM_BASE_URL");
-        }
+        let _g1 = unsafe { EnvGuard::remove("KIMI_API_KEY") };
+        let _g2 = unsafe { EnvGuard::remove("MOONSHOT_API_KEY") };
+        let _g3 = unsafe { EnvGuard::remove("RAFT_LLM_API_KEY") };
+        let _g4 = unsafe { EnvGuard::remove("RAFT_LLM_BASE_URL") };
+
         let creds = resolve_llm_credentials(None, None, Some("kimi"));
         assert!(creds.base_url.is_none(), "expected no default base URL");
         assert!(
@@ -1023,45 +1062,33 @@ mod tests {
 
     #[test]
     fn resolve_uses_provider_env_var_when_config_missing() {
-        // SAFETY: see above.
-        unsafe {
-            std::env::remove_var("OPENAI_API_KEY");
-            std::env::remove_var("RAFT_LLM_API_KEY");
-            std::env::set_var("KIMI_API_KEY", "sk-from-env");
-        }
+        let _g1 = unsafe { EnvGuard::remove("OPENAI_API_KEY") };
+        let _g2 = unsafe { EnvGuard::remove("RAFT_LLM_API_KEY") };
+        let _g3 = unsafe { EnvGuard::set("KIMI_API_KEY", "sk-from-env") };
+
         let creds = resolve_llm_credentials(None, None, Some("kimi"));
-        unsafe {
-            std::env::remove_var("KIMI_API_KEY");
-        }
         assert_eq!(creds.api_key.as_deref(), Some("sk-from-env"));
         assert_eq!(creds.api_key_source, Some(CredentialSource::Env));
     }
 
     #[test]
     fn resolve_falls_back_to_raft_llm_api_key() {
-        // SAFETY: see above.
-        unsafe {
-            std::env::remove_var("OPENAI_API_KEY");
-            std::env::remove_var("KIMI_API_KEY");
-            std::env::set_var("RAFT_LLM_API_KEY", "sk-override");
-        }
+        let _g1 = unsafe { EnvGuard::remove("OPENAI_API_KEY") };
+        let _g2 = unsafe { EnvGuard::remove("KIMI_API_KEY") };
+        let _g3 = unsafe { EnvGuard::set("RAFT_LLM_API_KEY", "sk-override") };
+
         let creds = resolve_llm_credentials(None, None, None);
-        unsafe {
-            std::env::remove_var("RAFT_LLM_API_KEY");
-        }
         assert_eq!(creds.api_key.as_deref(), Some("sk-override"));
         assert_eq!(creds.api_key_source, Some(CredentialSource::OverrideEnv));
     }
 
     #[test]
     fn resolve_reports_missing_when_nothing_found() {
-        // SAFETY: see above.
-        unsafe {
-            std::env::remove_var("OPENAI_API_KEY");
-            std::env::remove_var("KIMI_API_KEY");
-            std::env::remove_var("MOONSHOT_API_KEY");
-            std::env::remove_var("RAFT_LLM_API_KEY");
-        }
+        let _g1 = unsafe { EnvGuard::remove("OPENAI_API_KEY") };
+        let _g2 = unsafe { EnvGuard::remove("KIMI_API_KEY") };
+        let _g3 = unsafe { EnvGuard::remove("MOONSHOT_API_KEY") };
+        let _g4 = unsafe { EnvGuard::remove("RAFT_LLM_API_KEY") };
+
         let creds = resolve_llm_credentials(None, None, None);
         assert!(creds.api_key.is_none());
         assert_eq!(creds.api_key_source, Some(CredentialSource::Missing));

@@ -7,6 +7,7 @@
 use anyhow::Result;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
@@ -93,6 +94,15 @@ pub trait StateMgr: Send + Sync {
 
     /// Add a reminder.
     fn add_reminder(&self, reminder: Reminder);
+
+    /// Get the payloads for agents that should be restored as running.
+    fn running_agents(&self) -> HashMap<String, serde_json::Value>;
+
+    /// Persist an agent's `agent:start` payload so it can be restored on restart.
+    fn set_running_agent(&self, agent_id: &str, payload: serde_json::Value);
+
+    /// Remove an agent from the running set.
+    fn remove_running_agent(&self, agent_id: &str);
 }
 
 /// Alias for a boxed dyn StateMgr.
@@ -133,6 +143,10 @@ pub struct DaemonState {
     /// Daemon-specific metadata.
     #[serde(flatten)]
     pub metadata: serde_json::Map<String, serde_json::Value>,
+    /// Agent IDs that were running when the daemon last shut down, keyed by
+    /// agent ID with the original `agent:start` payload so they can be
+    /// restored on the next startup.
+    pub running_agents: DashMap<String, serde_json::Value>,
 }
 
 impl DaemonState {
@@ -158,6 +172,7 @@ impl DaemonState {
             started_at: chrono::Utc::now().timestamp_millis(),
             updated_at: chrono::Utc::now().timestamp_millis(),
             metadata: serde_json::Map::new(),
+            running_agents: DashMap::new(),
         }
     }
 
@@ -356,5 +371,20 @@ impl StateMgr for DaemonState {
 
     fn add_reminder(&self, reminder: Reminder) {
         self.reminders.insert(reminder.id.clone(), reminder);
+    }
+
+    fn running_agents(&self) -> HashMap<String, serde_json::Value> {
+        self.running_agents
+            .iter()
+            .map(|kv| (kv.key().clone(), kv.value().clone()))
+            .collect()
+    }
+
+    fn set_running_agent(&self, agent_id: &str, payload: serde_json::Value) {
+        self.running_agents.insert(agent_id.to_string(), payload);
+    }
+
+    fn remove_running_agent(&self, agent_id: &str) {
+        self.running_agents.remove(agent_id);
     }
 }

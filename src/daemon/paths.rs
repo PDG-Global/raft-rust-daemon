@@ -26,60 +26,124 @@ const DEFAULT_HOME_DIR_NAME: &str = ".raft-daemon";
 /// Environment variable used to override the daemon home directory.
 pub const RAFT_DAEMON_HOME_ENV: &str = "RAFT_DAEMON_HOME";
 
-/// Resolve the daemon home directory, creating it if missing.
+/// Resolve the default daemon home directory (`~/.raft-daemon`), creating it
+/// if missing.
+///
+/// This is kept for backward compatibility and tests. Profile-aware code should
+/// prefer [`home_dir_for_profile`].
 ///
 /// # Errors
 ///
 /// Returns an error if the user's home directory cannot be determined, the
 /// target path cannot be created, or the resolved path is not writable.
 pub fn home_dir() -> Result<PathBuf> {
+    home_dir_for_profile("default")
+}
+
+/// Resolve the daemon home directory for a given profile, creating it if missing.
+///
+/// Layout:
+/// - `default` profile: `~/.raft-daemon/`
+/// - other profiles: `~/.raft-daemon/profiles/<profile>/`
+///
+/// The default profile keeps the original layout so existing installs are not
+/// disrupted. The `RAFT_DAEMON_HOME` env var overrides everything, allowing
+/// fully custom locations when needed.
+///
+/// # Errors
+///
+/// Returns an error if the user's home directory cannot be determined, the
+/// target path cannot be created, or the resolved path is not writable.
+pub fn home_dir_for_profile(profile: &str) -> Result<PathBuf> {
     let path = if let Some(override_dir) = std::env::var_os(RAFT_DAEMON_HOME_ENV) {
         PathBuf::from(override_dir)
     } else {
         let user_home = user_home_dir().context("could not determine user home directory")?;
-        user_home.join(DEFAULT_HOME_DIR_NAME)
+        let base = user_home.join(DEFAULT_HOME_DIR_NAME);
+        if profile == "default" {
+            base
+        } else {
+            base.join("profiles").join(profile)
+        }
     };
 
     ensure_private_dir(&path)?;
     Ok(path)
 }
 
-/// Path to the daemon PID file (`<home>/daemon.pid`).
+/// Path to the daemon PID file for a profile (`<home>/daemon.pid`).
+///
+/// # Errors
+///
+/// Propagates errors from [`home_dir_for_profile`].
+pub fn pid_file_for_profile(profile: &str) -> Result<PathBuf> {
+    Ok(home_dir_for_profile(profile)?.join("daemon.pid"))
+}
+
+/// Path to the daemon PID file for the default profile.
 ///
 /// # Errors
 ///
 /// Propagates errors from [`home_dir`].
 pub fn pid_file() -> Result<PathBuf> {
-    Ok(home_dir()?.join("daemon.pid"))
+    pid_file_for_profile("default")
 }
 
-/// Path to the daemon state file (`<home>/state.json`).
+/// Path to the daemon state file for a profile (`<home>/state.json`).
+///
+/// # Errors
+///
+/// Propagates errors from [`home_dir_for_profile`].
+pub fn state_file_for_profile(profile: &str) -> Result<PathBuf> {
+    Ok(home_dir_for_profile(profile)?.join("state.json"))
+}
+
+/// Path to the daemon state file for the default profile.
 ///
 /// # Errors
 ///
 /// Propagates errors from [`home_dir`].
 pub fn state_file() -> Result<PathBuf> {
-    Ok(home_dir()?.join("state.json"))
+    state_file_for_profile("default")
 }
 
-/// Path to the daemon log directory (`<home>/logs/`), creating it if missing.
+/// Path to the daemon log directory for a profile (`<home>/logs/`), creating
+/// it if missing.
+///
+/// # Errors
+///
+/// Propagates errors from [`home_dir_for_profile`] or directory creation.
+pub fn log_dir_for_profile(profile: &str) -> Result<PathBuf> {
+    let dir = home_dir_for_profile(profile)?.join("logs");
+    ensure_private_dir(&dir)?;
+    Ok(dir)
+}
+
+/// Path to the daemon log directory for the default profile.
 ///
 /// # Errors
 ///
 /// Propagates errors from [`home_dir`] or directory creation.
 pub fn log_dir() -> Result<PathBuf> {
-    let dir = home_dir()?.join("logs");
-    ensure_private_dir(&dir)?;
-    Ok(dir)
+    log_dir_for_profile("default")
 }
 
-/// Path to the daemon log file (`<home>/logs/daemon.log`).
+/// Path to the daemon log file for a profile (`<home>/logs/daemon.log`).
+///
+/// # Errors
+///
+/// Propagates errors from [`log_dir_for_profile`].
+pub fn log_file_for_profile(profile: &str) -> Result<PathBuf> {
+    Ok(log_dir_for_profile(profile)?.join("daemon.log"))
+}
+
+/// Path to the daemon log file for the default profile.
 ///
 /// # Errors
 ///
 /// Propagates errors from [`log_dir`].
 pub fn log_file() -> Result<PathBuf> {
-    Ok(log_dir()?.join("daemon.log"))
+    log_file_for_profile("default")
 }
 
 /// Resolve the user's home directory from `$HOME` (Unix) or `$USERPROFILE`
@@ -155,13 +219,13 @@ fn ensure_private_dir(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_env::EnvGuard;
 
     #[test]
     fn home_dir_respects_env_override() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        // SAFETY: tests are single-threaded by default; env var scoping is
-        // local and the variable is restored on drop.
-        let _guard = test_env::set_env(RAFT_DAEMON_HOME_ENV, tmp.path());
+        // SAFETY: the shared ENV_LOCK is acquired by EnvGuard.
+        let _guard = unsafe { EnvGuard::set(RAFT_DAEMON_HOME_ENV, tmp.path()) };
 
         let home = home_dir().expect("home_dir resolves");
         assert_eq!(home, tmp.path());
@@ -181,7 +245,7 @@ mod tests {
     fn home_dir_creates_missing_dirs() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let nested = tmp.path().join("a").join("b");
-        let _guard = test_env::set_env(RAFT_DAEMON_HOME_ENV, &nested);
+        let _guard = unsafe { EnvGuard::set(RAFT_DAEMON_HOME_ENV, &nested) };
         let home = home_dir().expect("home_dir creates missing");
         assert_eq!(home, nested);
         assert!(nested.is_dir());
@@ -192,43 +256,9 @@ mod tests {
     fn home_dir_is_private() {
         use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::tempdir().expect("tempdir");
-        let _guard = test_env::set_env(RAFT_DAEMON_HOME_ENV, tmp.path().join("h"));
+        let _guard = unsafe { EnvGuard::set(RAFT_DAEMON_HOME_ENV, tmp.path().join("h")) };
         let home = home_dir().expect("home_dir");
         let mode = std::fs::metadata(&home).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o700);
-    }
-
-    /// Test helper: scope an environment variable to a single test and restore
-    /// the prior value on drop. Tests in this file run single-threaded so this
-    /// is safe.
-    struct EnvGuard {
-        key: &'static str,
-        prior: Option<std::ffi::OsString>,
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            // Safety: tests in this module are single-threaded; the env var
-            // mutation here is restoring the prior value, which is exactly
-            // what the safety contract requires (no concurrent reads of env).
-            unsafe {
-                match self.prior.take() {
-                    Some(val) => std::env::set_var(self.key, val),
-                    None => std::env::remove_var(self.key),
-                }
-            }
-        }
-    }
-
-    mod test_env {
-        use super::*;
-        pub(super) fn set_env(key: &'static str, value: impl AsRef<std::path::Path>) -> EnvGuard {
-            let prior = std::env::var_os(key);
-            // Safety: tests are single-threaded within this module.
-            unsafe {
-                std::env::set_var(key, value.as_ref());
-            }
-            EnvGuard { key, prior }
-        }
     }
 }
