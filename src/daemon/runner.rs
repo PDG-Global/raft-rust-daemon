@@ -1483,15 +1483,19 @@ fn prepare_delivery_prompt(
 
     let instruction = if is_dm {
         format!(
-            "This is a direct message to you. Respond helpfully and concisely. \
-             Only output `{NO_REPLY_MARKER}` if the message is completely unrelated to your role. \
-             Complete all your work before stopping."
+            "## Required response behavior\n\n\
+             - This is a direct message to you. You MUST respond.\n\
+             - Do not output `{NO_REPLY_MARKER}` for any direct message unless it is clearly spam or completely unrelated to your role.\n\
+             - This instruction overrides any other guidance about staying silent or minimizing conversation.\n\
+             - Respond helpfully and concisely. Complete all your work before stopping."
         )
     } else {
         format!(
-            "You are in a team channel. If this message is addressed to you, the team, the channel, or falls within your role, respond helpfully and concisely. \
-             Only output `{NO_REPLY_MARKER}` for messages that are clearly irrelevant, private side-conversations, or do not require your input. \
-             Complete all your work before stopping."
+            "## Required response behavior\n\n\
+             - You are in a team channel. If this message is addressed to you, the team, the channel, or falls within your role, respond helpfully and concisely.\n\
+             - Only output `{NO_REPLY_MARKER}` for messages that are clearly irrelevant, private side-conversations, or do not require your input.\n\
+             - This instruction overrides any other guidance about staying silent or minimizing conversation.\n\
+             - Complete all your work before stopping."
         )
     };
 
