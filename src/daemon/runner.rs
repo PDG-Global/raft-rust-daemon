@@ -1585,6 +1585,11 @@ async fn run_agent_turn(
                 None,
             )
             .await;
+
+            // Let the user know the agent failed to produce a response instead
+            // of leaving the delivery silently dropped.
+            let fallback = "Sorry, I ran into a problem while processing that request. Please try again.";
+            post_agent_reply(&process, delivery, server_url, fallback).await;
         }
     }
 }
