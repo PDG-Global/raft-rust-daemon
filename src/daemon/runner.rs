@@ -1594,11 +1594,28 @@ async fn run_agent_turn(
             )
             .await;
 
-            // Let the user know the agent failed to produce a response instead
-            // of leaving the delivery silently dropped.
-            let fallback = "Sorry, I ran into a problem while processing that request. Please try again.";
+            // Let the user know why the agent failed instead of silently
+            // dropping the delivery.
+            let fallback = rustycli_error_message(&err);
             post_agent_reply(&process, delivery, server_url, fallback).await;
         }
+    }
+}
+
+/// Choose a user-facing error message based on the RustyCLI error. Auth/
+/// API-key problems get a specific message so users can fix their setup
+/// instead of seeing a generic "try again" reply.
+fn rustycli_error_message(err: &anyhow::Error) -> &'static str {
+    let s = err.to_string().to_lowercase();
+    if s.contains("auth error")
+        || s.contains("http 401")
+        || s.contains("invalid_api_key")
+        || s.contains("incorrect api key")
+        || s.contains("unauthorized")
+    {
+        "I can't respond right now because the API key for this agent is invalid or missing. Please check the agent's API key configuration."
+    } else {
+        "Sorry, I ran into a problem while processing that request. Please try again."
     }
 }
 
@@ -2327,5 +2344,19 @@ mod tests {
     fn starts_with_no_reply_marker_is_false_for_normal_response() {
         assert!(!starts_with_no_reply_marker("Here is the answer."));
         assert!(!starts_with_no_reply_marker("The answer is no_reply."));
+    }
+
+    #[test]
+    fn rustycli_error_message_detects_auth_error() {
+        let err = anyhow::anyhow!("Error: Auth error: HTTP 401: invalid_api_key");
+        let msg = rustycli_error_message(&err);
+        assert!(msg.contains("API key"), "got: {msg}");
+    }
+
+    #[test]
+    fn rustycli_error_message_returns_generic_for_other_errors() {
+        let err = anyhow::anyhow!("connection refused");
+        let msg = rustycli_error_message(&err);
+        assert!(msg.contains("Sorry"), "got: {msg}");
     }
 }
