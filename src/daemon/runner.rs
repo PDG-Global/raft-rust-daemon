@@ -55,17 +55,14 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
 /// not post this marker (or an empty response) to raft.
 const NO_REPLY_MARKER: &str = "NO_REPLY";
 
-/// Strip a leading `NO_REPLY` marker (case-insensitive) and any trailing
-/// whitespace from a response. Returns the trimmed input unchanged if the
-/// marker is not present.
-fn strip_no_reply_marker(s: &str) -> &str {
+/// Returns true if the trimmed response starts with the `NO_REPLY` marker,
+/// case-insensitive. If the model emits the marker, the entire response is
+/// discarded rather than posted to raft.
+fn starts_with_no_reply_marker(s: &str) -> bool {
     let s = s.trim();
-    for marker in [NO_REPLY_MARKER, "no_reply", "No_Reply"] {
-        if let Some(rest) = s.strip_prefix(marker) {
-            return rest.trim();
-        }
-    }
-    s
+    s.len() >= NO_REPLY_MARKER.len()
+        && s[..NO_REPLY_MARKER.len()]
+            .eq_ignore_ascii_case(NO_REPLY_MARKER)
 }
 
 /// Options describing how to start the daemon.
@@ -1568,15 +1565,14 @@ async fn run_agent_turn(
     match result {
         Ok(response) => {
             let trimmed = response.trim();
-            let cleaned = strip_no_reply_marker(trimmed);
-            info!(agent_id = agent_id, response_len = cleaned.len(), "rusty turn completed");
-            tracing::info!(target: "raft_daemon::agent::response", agent_id = agent_id, response = %cleaned);
+            info!(agent_id = agent_id, response_len = trimmed.len(), "rusty turn completed");
+            tracing::info!(target: "raft_daemon::agent::response", agent_id = agent_id, response = %trimmed);
 
-            if cleaned.is_empty() {
+            if trimmed.is_empty() || starts_with_no_reply_marker(trimmed) {
                 tracing::debug!(agent_id = %agent_id, "rusty chose not to reply; skipping raft post");
             } else {
                 // POST the response to raft so it shows up in chat.
-                post_agent_reply(&process, delivery, server_url, cleaned).await;
+                post_agent_reply(&process, delivery, server_url, trimmed).await;
             }
 
             if let Err(err) =
@@ -2317,32 +2313,21 @@ mod tests {
     }
 
     #[test]
-    fn strip_no_reply_marker_strips_marker_and_returns_content() {
-        assert_eq!(
-            strip_no_reply_marker("NO_REPLY\n\nThese messages aren't relevant."),
-            "These messages aren't relevant."
-        );
+    fn starts_with_no_reply_marker_detects_exact_marker() {
+        assert!(starts_with_no_reply_marker("NO_REPLY"));
     }
 
     #[test]
-    fn strip_no_reply_marker_is_case_insensitive() {
-        assert_eq!(
-            strip_no_reply_marker("no_reply  Here is the answer."),
-            "Here is the answer."
-        );
+    fn starts_with_no_reply_marker_detects_prefixed_response() {
+        assert!(starts_with_no_reply_marker(
+            "NO_REPLY\n\nThese messages aren't relevant."
+        ));
+        assert!(starts_with_no_reply_marker("  no_reply here is content"));
     }
 
     #[test]
-    fn strip_no_reply_marker_returns_empty_for_marker_only() {
-        assert!(strip_no_reply_marker("NO_REPLY").is_empty());
-        assert!(strip_no_reply_marker("  NO_REPLY  ").is_empty());
-    }
-
-    #[test]
-    fn strip_no_reply_marker_leaves_unmarked_response_intact() {
-        assert_eq!(
-            strip_no_reply_marker("Here is the answer."),
-            "Here is the answer."
-        );
+    fn starts_with_no_reply_marker_is_false_for_normal_response() {
+        assert!(!starts_with_no_reply_marker("Here is the answer."));
+        assert!(!starts_with_no_reply_marker("The answer is no_reply."));
     }
 }
