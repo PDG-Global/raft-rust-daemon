@@ -105,13 +105,16 @@ fn parse_agent_command(command: &[String]) -> CliCommand {
     };
 
     let get = |idx: usize| command.get(idx).cloned().unwrap_or_default();
-    let get_or = |idx: usize, default: &str| command.get(idx).cloned().unwrap_or_else(|| default.to_string());
+    let get_or = |idx: usize, default: &str| {
+        command
+            .get(idx)
+            .cloned()
+            .unwrap_or_else(|| default.to_string())
+    };
 
     let sub_command = match sub {
         "list" => AgentCommand::List,
-        "get" => AgentCommand::Get {
-            agent_id: get(2),
-        },
+        "get" => AgentCommand::Get { agent_id: get(2) },
         "create" => AgentCommand::Create {
             name: get(2),
             description: get(3),
@@ -129,25 +132,15 @@ fn parse_agent_command(command: &[String]) -> CliCommand {
             reset_mode: command.get(7).cloned(),
             workspace: command.get(8).cloned(),
         },
-        "delete" => AgentCommand::Delete {
-            agent_id: get(2),
-        },
-        "start" => AgentCommand::Start {
-            agent_id: get(2),
-        },
-        "stop" => AgentCommand::Stop {
-            agent_id: get(2),
-        },
-        "restart" => AgentCommand::Restart {
-            agent_id: get(2),
-        },
+        "delete" => AgentCommand::Delete { agent_id: get(2) },
+        "start" => AgentCommand::Start { agent_id: get(2) },
+        "stop" => AgentCommand::Stop { agent_id: get(2) },
+        "restart" => AgentCommand::Restart { agent_id: get(2) },
         "reset" => AgentCommand::Reset {
             agent_id: get(2),
             mode: get_or(3, "session_reset"),
         },
-        "status" => AgentCommand::Status {
-            agent_id: get(2),
-        },
+        "status" => AgentCommand::Status { agent_id: get(2) },
         _ => {
             eprintln!("Unknown agent command: {sub}");
             std::process::exit(1);
@@ -161,7 +154,10 @@ fn parse_agent_command(command: &[String]) -> CliCommand {
 
 /// Print the top-level usage banner.
 fn print_usage() {
-    eprintln!("raft-daemon {} - agent lifecycle management", env!("CARGO_PKG_VERSION"));
+    eprintln!(
+        "raft-daemon {} - agent lifecycle management",
+        env!("CARGO_PKG_VERSION")
+    );
     eprintln!();
     eprintln!("Usage: raft-daemon [options] <command> [args...]");
     eprintln!();
@@ -177,7 +173,9 @@ fn print_usage() {
     eprintln!("  agent <command>              Manage agents (list, get, start, stop, ...)");
     eprintln!();
     eprintln!("Common options:");
-    eprintln!("      --server-url <url>       Server URL (default: $RAFT_SERVER_URL or https://api.raft.build)");
+    eprintln!(
+        "      --server-url <url>       Server URL (default: $RAFT_SERVER_URL or https://api.raft.build)"
+    );
     eprintln!("      --api-key <key>          API key (default: $RAFT_API_KEY)");
     eprintln!("      --profile <name>         Profile name (default: 'default')");
     eprintln!("      --foreground             Run the daemon in the foreground");

@@ -7,11 +7,10 @@ pub mod raft_client;
 pub use manager::*;
 pub use process::{
     AgentProcess, AgentProcessRegistry, CredentialSource, ProviderConfig, ResolvedLlmCredentials,
-    SharedAgentProcessRegistry, ensure_agents_dir, pick_rustycli_preset,
-    resolve_llm_credentials, resolve_rustycli_path, run_one_turn, strip_provider_prefix,
-    workspace_for,
+    SharedAgentProcessRegistry, ensure_agents_dir, pick_rustycli_preset, resolve_llm_credentials,
+    resolve_rustycli_path, run_one_turn, strip_provider_prefix, workspace_for,
 };
 pub use raft_client::{
     RunnerCredential, SendBody, SendResponse, derive_target, download_attachment,
-    mint_runner_credential, send_agent_message,
+    mint_runner_credential, raft_http_client, send_agent_message,
 };

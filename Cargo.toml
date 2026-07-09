@@ -1,6 +1,6 @@
 [package]
 name = "raft-daemon"
-version = "0.69.3"
+version = "0.72.0"
 edition = "2024"
 rust-version = "1.85"
 authors = ["Raft Contributors"]
@@ -96,6 +96,8 @@ aho-corasick = "1"
 bstr = "1"
 ignore = "0.4"
 rusty-cli = { version = "0.1", optional = true }
+hyper-util = { version = "0.1", features = ["server", "http1", "tokio"] }
+hyper = "1"
 
 [dev-dependencies]
 tokio-test = "0.4"

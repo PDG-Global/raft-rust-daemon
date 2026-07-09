@@ -35,11 +35,7 @@ impl EnvGuard {
         let _lock = ENV_LOCK.lock();
         let prior = std::env::var_os(key);
         unsafe { std::env::set_var(key, value) }
-        Self {
-            key,
-            prior,
-            _lock,
-        }
+        Self { key, prior, _lock }
     }
 
     /// Remove `key` and return a guard that restores it on drop.
@@ -51,11 +47,7 @@ impl EnvGuard {
         let _lock = ENV_LOCK.lock();
         let prior = std::env::var_os(key);
         unsafe { std::env::remove_var(key) }
-        Self {
-            key,
-            prior,
-            _lock,
-        }
+        Self { key, prior, _lock }
     }
 }
 

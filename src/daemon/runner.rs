@@ -36,11 +36,12 @@ use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 use crate::daemon::agent::{
-    AgentProcess, AgentProcessRegistry, SendBody, download_attachment, mint_runner_credential,
-    run_one_turn, send_agent_message, ProviderConfig,
+    AgentProcess, AgentProcessRegistry, ProviderConfig, SendBody, download_attachment,
+    mint_runner_credential, run_one_turn, send_agent_message,
 };
 use crate::daemon::paths;
 use crate::daemon::pidfile;
+use crate::daemon::proxy::AgentApiProxy;
 use crate::daemon::state::{DaemonState, StateMgr};
 use crate::daemon::update::{self, UpdateOptions};
 use crate::models::RuntimeConfig;
@@ -63,8 +64,7 @@ const NO_REPLY_MARKER: &str = "NO_REPLY";
 pub(crate) fn starts_with_no_reply_marker(s: &str) -> bool {
     let s = s.trim();
     s.len() >= NO_REPLY_MARKER.len()
-        && s[..NO_REPLY_MARKER.len()]
-            .eq_ignore_ascii_case(NO_REPLY_MARKER)
+        && s[..NO_REPLY_MARKER.len()].eq_ignore_ascii_case(NO_REPLY_MARKER)
 }
 
 /// Options describing how to start the daemon.
@@ -101,16 +101,11 @@ impl DaemonOptions {
         } else if trimmed.starts_with("wss://") || trimmed.starts_with("ws://") {
             trimmed.to_string()
         } else if trimmed.contains("://") {
-            anyhow::bail!(
-                "unsupported scheme in server_url: {trimmed}; use https:// or wss://"
-            );
+            anyhow::bail!("unsupported scheme in server_url: {trimmed}; use https:// or wss://");
         } else {
             format!("wss://{trimmed}")
         };
-        Ok(format!(
-            "{scheme_base}/daemon/connect?key={}",
-            self.api_key
-        ))
+        Ok(format!("{scheme_base}/daemon/connect?key={}", self.api_key))
     }
 }
 
@@ -240,7 +235,10 @@ fn spawn_background(opts: &DaemonOptions) -> Result<u32> {
     let home = paths::home_dir_for_profile(&opts.profile)?;
     println!("raft daemon started (pid={pid})");
     println!("  home:    {}", home.display());
-    println!("  logs:    {}", paths::log_file_for_profile(&opts.profile)?.display());
+    println!(
+        "  logs:    {}",
+        paths::log_file_for_profile(&opts.profile)?.display()
+    );
     println!("  server:  {}", opts.server_url);
     println!("  profile: {}", opts.profile);
     println!("\nUse `raft-daemon stop` to shut down.");
@@ -351,7 +349,11 @@ async fn run_foreground(opts: DaemonOptions) -> Result<()> {
     refuse_if_already_running(&pid_path)?;
     let my_pid = i32::try_from(std::process::id()).unwrap_or(i32::MAX);
     pidfile::write_pid(&pid_path, my_pid)?;
-    info!(pid = my_pid, version = env!("CARGO_PKG_VERSION"), "raft daemon starting (foreground)");
+    info!(
+        pid = my_pid,
+        version = env!("CARGO_PKG_VERSION"),
+        "raft daemon starting (foreground)"
+    );
     info!(server_url = %opts.server_url, profile = %opts.profile, "configuration loaded");
     info!(home = %home.display(), "daemon home");
 
@@ -367,6 +369,12 @@ async fn run_foreground(opts: DaemonOptions) -> Result<()> {
 
     let agents: Arc<AgentProcessRegistry> = Arc::new(AgentProcessRegistry::new());
     let active_turns: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
+
+    let proxy = AgentApiProxy::start(opts.server_url.clone(), agents.clone())
+        .await
+        .context("starting agent-api proxy")?;
+    let proxy_url = proxy.url.clone();
+    info!(proxy_url = %proxy_url, "agent-api proxy ready");
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     spawn_signal_handler(shutdown_tx);
@@ -384,12 +392,14 @@ async fn run_foreground(opts: DaemonOptions) -> Result<()> {
         agents.clone(),
         active_turns.clone(),
         opts.api_key.clone(),
+        proxy_url,
         shutdown_rx,
     )
     .await;
 
     update_checker.abort();
     let _ = update_checker.await;
+    proxy.shutdown().await;
 
     // Always clean up the PID file on exit, even on error.
     pidfile::remove_pid(&pid_path);
@@ -442,6 +452,7 @@ async fn run_event_loop(
     agents: Arc<AgentProcessRegistry>,
     active_turns: Arc<AtomicUsize>,
     api_key: String,
+    proxy_url: String,
     mut shutdown_rx: watch::Receiver<bool>,
 ) -> Result<()> {
     let mut backoff = INITIAL_RECONNECT_BACKOFF;
@@ -457,12 +468,7 @@ async fn run_event_loop(
 
         match connect_async_with_opts(&ws_url).await {
             Ok((ws, response)) => {
-                info!(
-                    status = response
-                        .status()
-                        .as_u16(),
-                    "connected to server"
-                );
+                info!(status = response.status().as_u16(), "connected to server");
                 backoff = INITIAL_RECONNECT_BACKOFF;
                 match drive_connection(
                     ws,
@@ -472,6 +478,7 @@ async fn run_event_loop(
                     opts.server_url.clone(),
                     api_key.clone(),
                     opts.profile.clone(),
+                    proxy_url.clone(),
                     &mut shutdown_rx,
                 )
                 .await
@@ -565,6 +572,7 @@ async fn drive_connection(
     server_url: String,
     api_key: String,
     profile: String,
+    proxy_url: String,
     shutdown_rx: &mut watch::Receiver<bool>,
 ) -> Result<ConnectionOutcome> {
     let (write, mut read) = ws.split();
@@ -597,6 +605,7 @@ async fn drive_connection(
             &server_url,
             &api_key,
             &profile,
+            &proxy_url,
             &payload,
         )
         .await
@@ -629,6 +638,7 @@ async fn drive_connection(
                             &server_url,
                             &api_key,
                             &profile,
+                            &proxy_url,
                         ).await {
                             warn!(error = %err, "error handling server message");
                         }
@@ -727,6 +737,7 @@ async fn handle_server_message(
     server_url: &str,
     api_key: &str,
     profile: &str,
+    proxy_url: &str,
 ) -> Result<()> {
     let value: serde_json::Value = serde_json::from_str(text).context("parsing server JSON")?;
     let kind = value
@@ -759,7 +770,11 @@ async fn handle_server_message(
                 .get("machine_id")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-            info!(server_id = server_id, machine_id = machine_id, "server ready");
+            info!(
+                server_id = server_id,
+                machine_id = machine_id,
+                "server ready"
+            );
             // TODO: persist observed server/machine identity into state.
         }
 
@@ -770,7 +785,10 @@ async fn handle_server_message(
         // server routes future deliveries here. We do NOT spawn RustyCLI
         // eagerly; that happens on the first `agent:deliver`.
         "agent:start" => {
-            start_agent(outbound, agents, state, server_url, api_key, profile, &value).await?;
+            start_agent(
+                outbound, agents, state, server_url, api_key, profile, proxy_url, &value,
+            )
+            .await?;
         }
 
         // Server delivered a chat message to an agent. We ack immediately so
@@ -785,9 +803,7 @@ async fn handle_server_message(
                 .unwrap_or("")
                 .to_string();
             let delivery_id = value.get("deliveryId").cloned();
-            let launch_id = agents
-                .with(&agent_id, |p| p.launch_id.clone())
-                .flatten();
+            let launch_id = agents.with(&agent_id, |p| p.launch_id.clone()).flatten();
             let seq = value
                 .get("seq")
                 .and_then(serde_json::Value::as_i64)
@@ -861,14 +877,8 @@ async fn handle_server_message(
         }
 
         "agent:workspace:list" => {
-            let agent_id = value
-                .get("agentId")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let dir_path = value
-                .get("dirPath")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let agent_id = value.get("agentId").and_then(|v| v.as_str()).unwrap_or("");
+            let dir_path = value.get("dirPath").and_then(|v| v.as_str()).unwrap_or("");
             let include_hidden = value
                 .get("includeHidden")
                 .and_then(serde_json::Value::as_bool)
@@ -884,25 +894,25 @@ async fn handle_server_message(
 
             let files = list_workspace_files(&workspace, dir_path, include_hidden);
             let mut payload = serde_json::Map::new();
-            payload.insert("type".to_string(), serde_json::json!("agent:workspace:file_tree"));
+            payload.insert(
+                "type".to_string(),
+                serde_json::json!("agent:workspace:file_tree"),
+            );
             payload.insert("agentId".to_string(), serde_json::json!(agent_id));
             payload.insert("files".to_string(), serde_json::json!(files));
             if !dir_path.is_empty() {
                 payload.insert("dirPath".to_string(), serde_json::json!(dir_path));
             }
-            payload.insert("includeHidden".to_string(), serde_json::json!(include_hidden));
+            payload.insert(
+                "includeHidden".to_string(),
+                serde_json::json!(include_hidden),
+            );
             send_json(outbound, serde_json::Value::Object(payload)).await?;
         }
 
         "agent:workspace:read" => {
-            let agent_id = value
-                .get("agentId")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let file_path = value
-                .get("path")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let agent_id = value.get("agentId").and_then(|v| v.as_str()).unwrap_or("");
+            let file_path = value.get("path").and_then(|v| v.as_str()).unwrap_or("");
             let request_id = value.get("requestId").cloned();
 
             let workspace = agents
@@ -915,7 +925,10 @@ async fn handle_server_message(
 
             let result = read_workspace_file(&workspace, file_path);
             let mut payload = serde_json::Map::new();
-            payload.insert("type".to_string(), serde_json::json!("agent:workspace:file_content"));
+            payload.insert(
+                "type".to_string(),
+                serde_json::json!("agent:workspace:file_content"),
+            );
             payload.insert("agentId".to_string(), serde_json::json!(agent_id));
             if let Some(rid) = request_id {
                 payload.insert("requestId".to_string(), rid);
@@ -945,18 +958,15 @@ async fn handle_server_message(
             // Server is checking if the agent is still alive. Respond with an
             // online activity so the UI shows the agent as available and the
             // probe is acknowledged.
-            let agent_id = value
-                .get("agentId")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let probe_id = value
-                .get("probeId")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let agent_id = value.get("agentId").and_then(|v| v.as_str()).unwrap_or("");
+            let probe_id = value.get("probeId").and_then(|v| v.as_str()).unwrap_or("");
             if agent_id.is_empty() || probe_id.is_empty() {
                 tracing::debug!("ignoring agent:activity_probe without agentId or probeId");
             } else if let Some((client_seq, launch_id)) = agents.with(agent_id, |p| {
-                (p.next_activity_client_seq(), p.launch_id.as_ref().map(|s| serde_json::json!(s)))
+                (
+                    p.next_activity_client_seq(),
+                    p.launch_id.as_ref().map(|s| serde_json::json!(s)),
+                )
             }) {
                 let launch_ref = launch_id.as_ref();
                 if let Err(err) = send_agent_activity(
@@ -1003,20 +1013,18 @@ async fn handle_server_message(
         }
 
         "agent:reset-workspace" | "agent:inbox:purge" => {
-            let agent_id = value
-                .get("agentId")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            info!(agent_id = agent_id, kind = kind, "agent maintenance message — no-op (no agent-side state to reset yet)");
+            let agent_id = value.get("agentId").and_then(|v| v.as_str()).unwrap_or("");
+            info!(
+                agent_id = agent_id,
+                kind = kind,
+                "agent maintenance message — no-op (no agent-side state to reset yet)"
+            );
         }
 
         // Server wants the agent's available skills. We have no agent
         // process, so report empty.
         "agent:skills:list" => {
-            let agent_id = value
-                .get("agentId")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let agent_id = value.get("agentId").and_then(|v| v.as_str()).unwrap_or("");
             send_json(
                 outbound,
                 serde_json::json!({
@@ -1029,28 +1037,161 @@ async fn handle_server_message(
             .await?;
         }
 
-        "agent:message"
-        | "agent:task"
-        | "agent:reminder"
-        | "agent:reset"
-        | "agent:wake" => {
+        "agent:runtime_profile:migration" => {
+            let agent_id = value
+                .get("agentId")
+                .cloned()
+                .unwrap_or(serde_json::json!(""));
+            let request_id = value.get("requestId").cloned();
+            send_json(
+                outbound,
+                serde_json::json!({
+                    "type": "agent:runtime_profile:migration:ack",
+                    "agentId": agent_id.clone(),
+                    "requestId": request_id.clone(),
+                }),
+            )
+            .await?;
+            send_json(
+                outbound,
+                serde_json::json!({
+                    "type": "agent:runtime_profile:migration_done",
+                    "agentId": agent_id,
+                    "requestId": request_id,
+                }),
+            )
+            .await?;
+        }
+
+        "agent:runtime_profile:daemon_release_notice" => {
+            let agent_id = value
+                .get("agentId")
+                .cloned()
+                .unwrap_or(serde_json::json!(""));
+            let request_id = value.get("requestId").cloned();
+            send_json(
+                outbound,
+                serde_json::json!({
+                    "type": "agent:runtime_profile:daemon_release_notice:ack",
+                    "agentId": agent_id,
+                    "requestId": request_id,
+                }),
+            )
+            .await?;
+        }
+
+        "agent:diagnostic:session_transcript" => {
+            let agent_id = value
+                .get("agentId")
+                .cloned()
+                .unwrap_or(serde_json::json!(""));
+            let request_id = value.get("requestId").cloned();
+            send_json(
+                outbound,
+                serde_json::json!({
+                    "type": "agent:diagnostic:session_transcript_result",
+                    "agentId": agent_id,
+                    "requestId": request_id,
+                    "transcript": null,
+                    "error": "not implemented",
+                }),
+            )
+            .await?;
+        }
+
+        "agent:diagnostic:feedback_transcript" => {
+            let agent_id = value
+                .get("agentId")
+                .cloned()
+                .unwrap_or(serde_json::json!(""));
+            let request_id = value.get("requestId").cloned();
+            send_json(
+                outbound,
+                serde_json::json!({
+                    "type": "agent:diagnostic:feedback_transcript_result",
+                    "agentId": agent_id,
+                    "requestId": request_id,
+                    "transcript": null,
+                    "error": "not implemented",
+                }),
+            )
+            .await?;
+        }
+
+        "machine:workspace:scan" => {
+            let request_id = value.get("requestId").cloned();
+            let home = paths::home_dir_for_profile(profile).unwrap_or_default();
+            let agents_dir = home.join("agents");
+            let workspaces = match std::fs::read_dir(&agents_dir) {
+                Ok(entries) => entries
+                    .filter_map(std::result::Result::ok)
+                    .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+                    .map(|e| e.path().display().to_string())
+                    .collect::<Vec<_>>(),
+                Err(_) => Vec::new(),
+            };
+            send_json(
+                outbound,
+                serde_json::json!({
+                    "type": "machine:workspace:scan_result",
+                    "requestId": request_id,
+                    "workspaces": workspaces,
+                }),
+            )
+            .await?;
+        }
+
+        "machine:workspace:delete" => {
+            let request_id = value.get("requestId").cloned();
+            let path = value.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            let result = if path.is_empty() || path.starts_with('/') || path.contains("..") {
+                Err(anyhow::anyhow!("invalid path"))
+            } else {
+                let home = paths::home_dir_for_profile(profile).unwrap_or_default();
+                let target = home.join("agents").join(path);
+                std::fs::remove_dir_all(&target)
+                    .with_context(|| format!("deleting {}", target.display()))
+            };
+            let success = result.is_ok();
+            let error = result.err().map(|e| e.to_string());
+            send_json(
+                outbound,
+                serde_json::json!({
+                    "type": "machine:workspace:delete_result",
+                    "requestId": request_id,
+                    "success": success,
+                    "error": error,
+                }),
+            )
+            .await?;
+        }
+
+        "agent:message" | "agent:task" | "agent:reminder" | "agent:reset" | "agent:wake" => {
             // Forward to the agent manager. The current AgentManager has
             // placeholder responses; full dispatch lands in a follow-up.
             dispatch_to_agent(&value, state);
         }
         "task:assign" | "task:cancel" | "task:update" => {
-            let task_id = value
-                .get("task_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("?");
+            let task_id = value.get("task_id").and_then(|v| v.as_str()).unwrap_or("?");
             info!(kind = kind, task_id = task_id, "task event received");
         }
-        "reminder:fire" | "reminder:snooze" | "reminder:cancel" => {
+        "reminder:fire" | "reminder:snooze" | "reminder:cancel" | "reminder.upsert"
+        | "reminder.cancel" | "reminder.snapshot" => {
             let reminder_id = value
                 .get("reminder_id")
                 .and_then(|v| v.as_str())
                 .unwrap_or("?");
-            info!(kind = kind, reminder_id = reminder_id, "reminder event received");
+            info!(
+                kind = kind,
+                reminder_id = reminder_id,
+                "reminder event received"
+            );
+        }
+        "computer:restart" | "computer:upgrade" => {
+            info!(
+                kind = kind,
+                "computer control event received — no handler configured"
+            );
         }
 
         // ---- machine-level requests ----
@@ -1060,10 +1201,7 @@ async fn handle_server_message(
         // `unsupported` and let the server fall back to its defaults.
         "machine:runtime_models:detect" => {
             let request_id = value.get("requestId").cloned();
-            let runtime = value
-                .get("runtime")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let runtime = value.get("runtime").and_then(|v| v.as_str()).unwrap_or("");
             send_json(
                 outbound,
                 serde_json::json!({
@@ -1073,7 +1211,10 @@ async fn handle_server_message(
                 }),
             )
             .await?;
-            tracing::debug!(runtime = runtime, "declined runtime_models:detect (not implemented)");
+            tracing::debug!(
+                runtime = runtime,
+                "declined runtime_models:detect (not implemented)"
+            );
         }
 
         _ => {
@@ -1087,6 +1228,7 @@ async fn handle_server_message(
 /// Install a running agent from the server's `agent:start` payload and announce
 /// it as online. Also persists the payload so the agent can be restored on a
 /// future daemon restart.
+#[allow(clippy::too_many_arguments)]
 async fn start_agent(
     outbound: &mpsc::Sender<WsMessage>,
     agents: &Arc<AgentProcessRegistry>,
@@ -1094,6 +1236,7 @@ async fn start_agent(
     server_url: &str,
     api_key: &str,
     profile: &str,
+    proxy_url: &str,
     value: &serde_json::Value,
 ) -> Result<()> {
     let agent_id = value
@@ -1106,15 +1249,15 @@ async fn start_agent(
         return Ok(());
     }
     let launch_id = value.get("launchId").cloned();
-    let config = value.get("config").cloned().unwrap_or(serde_json::json!({}));
+    let config = value
+        .get("config")
+        .cloned()
+        .unwrap_or(serde_json::json!({}));
     let runtime = config
         .get("runtime")
         .and_then(|v| v.as_str())
         .unwrap_or("builtin");
-    let model = config
-        .get("model")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let model = config.get("model").and_then(|v| v.as_str()).unwrap_or("");
     let provider_config = ProviderConfig::from_config(&config);
     let provider_id = provider_config.provider_id.as_deref().unwrap_or("");
     let provider_kind = provider_config.kind.as_deref().unwrap_or("");
@@ -1167,6 +1310,26 @@ async fn start_agent(
                 .clone()
                 .unwrap_or_else(|| format!("sess_{}", uuid::Uuid::new_v4()));
             process.session_id = Some(session_id.clone());
+
+            let proxy_token = format!("sap_{}", uuid::Uuid::new_v4());
+            let token_dir = home.join("agent-proxy-tokens").join(&agent_id);
+            let token_file = if let Some(lid) = launch_id.as_ref().and_then(|v| v.as_str()) {
+                token_dir.join(format!("{lid}.token"))
+            } else {
+                token_dir.join("default.token")
+            };
+            if let Err(err) = write_proxy_token_file(&token_file, &proxy_token) {
+                warn!(
+                    error = %err,
+                    agent_id = %agent_id,
+                    path = %token_file.display(),
+                    "failed to write agent proxy token file"
+                );
+            }
+            process.agent_proxy_token = Some(proxy_token);
+            process.agent_proxy_token_file = Some(token_file);
+            process.proxy_url = Some(proxy_url.to_string());
+            process.server_url = Some(server_url.to_string());
 
             match mint_runner_credential(server_url, api_key, &agent_id, &process.runtime).await {
                 Ok(cred) => {
@@ -1257,6 +1420,48 @@ fn dispatch_to_agent(value: &serde_json::Value, _state: &Arc<dyn StateMgr>) {
     info!(agent_id = agent_id, "agent dispatch (scaffold)");
 }
 
+/// Write a proxy token to disk with private permissions.
+fn write_proxy_token_file(path: &std::path::Path, token: &str) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(parent)
+                .with_context(|| format!("creating proxy token dir {}", parent.display()))?;
+        }
+        #[cfg(not(unix))]
+        {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating proxy token dir {}", parent.display()))?;
+        }
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)
+            .and_then(|mut file| {
+                use std::io::Write;
+                file.write_all(token.as_bytes())?;
+                file.write_all(b"\n")
+            })
+            .with_context(|| format!("writing proxy token file {}", path.display()))?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, format!("{token}\n"))
+            .with_context(|| format!("writing proxy token file {}", path.display()))?;
+    }
+    Ok(())
+}
+
 /// Result of reading a workspace file for `agent:workspace:read`.
 enum ReadResult {
     Text { content: String, size: u64 },
@@ -1269,17 +1474,20 @@ const TEXT_MAX_BYTES: u64 = 1_048_576; // 1 MB
 /// Returns text for known text extensions, or a binary marker for other files.
 /// Errors are returned for access outside the workspace, directories, or I/O
 /// failures.
-fn read_workspace_file(
-    workspace: &std::path::Path,
-    file_path: &str,
-) -> Result<ReadResult> {
+fn read_workspace_file(workspace: &std::path::Path, file_path: &str) -> Result<ReadResult> {
     if file_path.is_empty() {
         anyhow::bail!("empty file path");
     }
 
     let full_path = workspace.join(file_path).canonicalize()?;
-    let workspace_canon = workspace.canonicalize().unwrap_or_else(|_| workspace.to_path_buf());
-    let prefix = format!("{}{sep}", workspace_canon.display(), sep = std::path::MAIN_SEPARATOR);
+    let workspace_canon = workspace
+        .canonicalize()
+        .unwrap_or_else(|_| workspace.to_path_buf());
+    let prefix = format!(
+        "{}{sep}",
+        workspace_canon.display(),
+        sep = std::path::MAIN_SEPARATOR
+    );
     if !full_path.starts_with(&prefix) && full_path != workspace_canon {
         anyhow::bail!("access denied: path escapes workspace");
     }
@@ -1297,8 +1505,22 @@ fn read_workspace_file(
     let is_text = extension.is_empty()
         || matches!(
             extension.as_str(),
-            "md" | "txt" | "json" | "js" | "ts" | "jsx" | "tsx" | "yaml" | "yml"
-                | "toml" | "log" | "csv" | "xml" | "html" | "css" | "sh" | "py"
+            "md" | "txt"
+                | "json"
+                | "js"
+                | "ts"
+                | "jsx"
+                | "tsx"
+                | "yaml"
+                | "yml"
+                | "toml"
+                | "log"
+                | "csv"
+                | "xml"
+                | "html"
+                | "css"
+                | "sh"
+                | "py"
                 | "rs"
         );
 
@@ -1331,8 +1553,14 @@ fn list_workspace_files(
         workspace.to_path_buf()
     } else {
         let resolved = workspace.join(dir_path).canonicalize().unwrap_or_default();
-        let workspace_canon = workspace.canonicalize().unwrap_or_else(|_| workspace.to_path_buf());
-        let prefix = format!("{}{sep}", workspace_canon.display(), sep = std::path::MAIN_SEPARATOR);
+        let workspace_canon = workspace
+            .canonicalize()
+            .unwrap_or_else(|_| workspace.to_path_buf());
+        let prefix = format!(
+            "{}{sep}",
+            workspace_canon.display(),
+            sep = std::path::MAIN_SEPARATOR
+        );
         if !resolved.starts_with(&prefix) && resolved != workspace_canon {
             return Vec::new();
         }
@@ -1374,16 +1602,17 @@ fn list_workspace_files(
         let size = if is_directory {
             0
         } else {
-            std::fs::metadata(&full_path)
-                .map_or(0, |m| m.len())
+            std::fs::metadata(&full_path).map_or(0, |m| m.len())
         };
         let modified_at = std::fs::metadata(&full_path)
             .and_then(|m| m.modified())
             .ok()
-            .and_then(|t| chrono::DateTime::from_timestamp(
-                i64::try_from(t.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs()).ok()?,
-                0,
-            ))
+            .and_then(|t| {
+                chrono::DateTime::from_timestamp(
+                    i64::try_from(t.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs()).ok()?,
+                    0,
+                )
+            })
             .map(|dt| dt.to_rfc3339())
             .unwrap_or_default();
 
@@ -1480,10 +1709,7 @@ fn prepare_delivery_prompt(
     downloaded: &[DownloadedAttachment],
 ) -> Option<String> {
     let msg = delivery.get("message")?;
-    let content = msg
-        .get("content")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let content = msg.get("content").and_then(|v| v.as_str()).unwrap_or("");
     let attachments: &[serde_json::Value] = msg
         .get("attachments")
         .and_then(|v| v.as_array())
@@ -1589,7 +1815,11 @@ fn prepare_delivery_prompt(
             .join("\n");
         format!(
             "\n\nThe following attached file{} been downloaded to your workspace `notes/` folder and are available for review:\n{files}",
-            if downloaded.len() == 1 { " has" } else { "s have" }
+            if downloaded.len() == 1 {
+                " has"
+            } else {
+                "s have"
+            }
         )
     };
 
@@ -1647,22 +1877,20 @@ async fn download_delivery_attachments(
         let path = notes_dir.join(&filename);
 
         match download_attachment(server_url, agent_api_key, id).await {
-            Ok(bytes) => {
-                match tokio::fs::write(&path, &bytes).await {
-                    Ok(()) => {
-                        info!(
-                            attachment_id = %id,
-                            filename = %filename,
-                            path = %path.display(),
-                            "downloaded attachment to workspace"
-                        );
-                        downloaded.push(DownloadedAttachment { filename, path });
-                    }
-                    Err(err) => {
-                        warn!(error = %err, path = %path.display(), "failed to write attachment to workspace");
-                    }
+            Ok(bytes) => match tokio::fs::write(&path, &bytes).await {
+                Ok(()) => {
+                    info!(
+                        attachment_id = %id,
+                        filename = %filename,
+                        path = %path.display(),
+                        "downloaded attachment to workspace"
+                    );
+                    downloaded.push(DownloadedAttachment { filename, path });
                 }
-            }
+                Err(err) => {
+                    warn!(error = %err, path = %path.display(), "failed to write attachment to workspace");
+                }
+            },
             Err(err) => {
                 warn!(error = %err, attachment_id = %id, "failed to download attachment");
             }
@@ -1691,7 +1919,10 @@ fn format_attachment_suffix(attachments: &[serde_json::Value]) -> String {
     let list = attachments
         .iter()
         .map(|a| {
-            let filename = a.get("filename").and_then(|v| v.as_str()).unwrap_or("unknown");
+            let filename = a
+                .get("filename")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
             let id = a.get("id").and_then(|v| v.as_str()).unwrap_or("-");
             format!("{filename} (id:{id})")
         })
@@ -1739,18 +1970,19 @@ async fn run_agent_turn(
     // the files in its workspace and can reference them in its reply. The
     // attachment endpoint requires an agent credential, not the machine key.
     let agent_key = process.agent_credential_key.as_deref();
-    let downloaded = download_delivery_attachments(
-        delivery,
-        server_url,
-        agent_key,
-        &process.workspace,
-    )
-    .await;
+    let downloaded =
+        download_delivery_attachments(delivery, server_url, agent_key, &process.workspace).await;
 
     // Decide whether to respond and build a prompt that mirrors the npm
     // daemon's stdin format (target, sender, context) plus an explicit
     // instruction to only reply when addressed.
-    let Some(prompt) = prepare_delivery_prompt(agent_id, &process.name, &process.description, delivery, &downloaded) else {
+    let Some(prompt) = prepare_delivery_prompt(
+        agent_id,
+        &process.name,
+        &process.description,
+        delivery,
+        &downloaded,
+    ) else {
         return;
     };
 
@@ -1759,7 +1991,19 @@ async fn run_agent_turn(
     // "database is locked" errors.
     let _turn_guard = process.turn_lock.lock().await;
 
-    if let Err(err) = send_agent_activity(outbound, agent_id, "working", "working", "Thinking…", "message_received", launch_ref, process.next_activity_client_seq(), None).await {
+    if let Err(err) = send_agent_activity(
+        outbound,
+        agent_id,
+        "working",
+        "working",
+        "Thinking…",
+        "message_received",
+        launch_ref,
+        process.next_activity_client_seq(),
+        None,
+    )
+    .await
+    {
         warn!(error = %err, "failed to broadcast working activity");
     }
 
@@ -1768,7 +2012,11 @@ async fn run_agent_turn(
     match result {
         Ok(response) => {
             let trimmed = response.trim();
-            info!(agent_id = agent_id, response_len = trimmed.len(), "rusty turn completed");
+            info!(
+                agent_id = agent_id,
+                response_len = trimmed.len(),
+                "rusty turn completed"
+            );
             tracing::info!(target: "raft_daemon::agent::response", agent_id = agent_id, response = %trimmed);
 
             if trimmed.is_empty() || starts_with_no_reply_marker(trimmed) {
@@ -1778,8 +2026,18 @@ async fn run_agent_turn(
                 post_agent_reply(&process, delivery, server_url, trimmed).await;
             }
 
-            if let Err(err) =
-                send_agent_activity(outbound, agent_id, "online", "online", "Idle", "idle", launch_ref, process.next_activity_client_seq(), None).await
+            if let Err(err) = send_agent_activity(
+                outbound,
+                agent_id,
+                "online",
+                "online",
+                "Idle",
+                "idle",
+                launch_ref,
+                process.next_activity_client_seq(),
+                None,
+            )
+            .await
             {
                 warn!(error = %err, "failed to broadcast idle activity");
             }
@@ -2057,8 +2315,7 @@ fn computer_version() -> Option<String> {
 /// Returns an error if no daemon is running or it fails to terminate.
 pub async fn stop(profile: &str) -> Result<()> {
     let pid_path = paths::pid_file_for_profile(profile)?;
-    let pid = pidfile::read_pid(&pid_path)?
-        .ok_or_else(|| anyhow::anyhow!("daemon not running"))?;
+    let pid = pidfile::read_pid(&pid_path)?.ok_or_else(|| anyhow::anyhow!("daemon not running"))?;
 
     if !pidfile::is_alive(pid) {
         pidfile::remove_pid(&pid_path);
@@ -2083,7 +2340,10 @@ pub async fn stop(profile: &str) -> Result<()> {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
-    warn!(pid = pid, "daemon did not exit on SIGTERM; escalating to SIGKILL");
+    warn!(
+        pid = pid,
+        "daemon did not exit on SIGTERM; escalating to SIGKILL"
+    );
     let _ = pidfile::send_signal(pid, libc::SIGKILL);
     for _ in 0..50 {
         if !pidfile::is_alive(pid) {
@@ -2177,10 +2437,7 @@ fn init_tracing(profile: &str) -> Result<()> {
 
     let interactive = std::io::stdout().is_terminal();
     if interactive {
-        let _ = fmt()
-            .with_env_filter(filter)
-            .with_target(false)
-            .try_init();
+        let _ = fmt().with_env_filter(filter).with_target(false).try_init();
         return Ok(());
     }
 
@@ -2360,10 +2617,7 @@ mod tests {
         )
         .into();
         let msg = friendly_connect_error(&err);
-        assert!(
-            msg.contains("without WebSocket upgrade"),
-            "got: {msg}"
-        );
+        assert!(msg.contains("without WebSocket upgrade"), "got: {msg}");
         assert!(msg.contains("api.raft.build"));
     }
 
@@ -2397,8 +2651,7 @@ mod tests {
         let has_builtin = runtimes.iter().any(|r| r == "builtin");
         let rusty_resolved = resolve_rustycli_path().is_some();
         assert_eq!(
-            has_builtin,
-            rusty_resolved,
+            has_builtin, rusty_resolved,
             "`builtin` should be advertised iff RustyCLI is installed; \
              got builtin={has_builtin}, rusty_resolved={rusty_resolved}",
         );
@@ -2463,7 +2716,9 @@ mod tests {
                 "channel_name": "general",
             }
         });
-        assert!(prepare_delivery_prompt(agent_id, "Agent", "A test agent", &delivery, &[]).is_none());
+        assert!(
+            prepare_delivery_prompt(agent_id, "Agent", "A test agent", &delivery, &[]).is_none()
+        );
     }
 
     #[test]
@@ -2478,7 +2733,9 @@ mod tests {
                 "channel_name": "general",
             }
         });
-        assert!(prepare_delivery_prompt("ag_123", "Agent", "A test agent", &delivery, &[]).is_none());
+        assert!(
+            prepare_delivery_prompt("ag_123", "Agent", "A test agent", &delivery, &[]).is_none()
+        );
     }
 
     #[test]
@@ -2493,7 +2750,8 @@ mod tests {
                 "sender_name": "other-bot",
             }
         });
-        let prompt = prepare_delivery_prompt("ag_123", "Agent", "A test agent", &delivery, &[]).unwrap();
+        let prompt =
+            prepare_delivery_prompt("ag_123", "Agent", "A test agent", &delivery, &[]).unwrap();
         assert!(prompt.contains("hello"));
         assert!(prompt.contains("New message received:"));
     }
@@ -2510,7 +2768,8 @@ mod tests {
                 "channel_name": "general",
             }
         });
-        let prompt = prepare_delivery_prompt("ag_123", "Agent", "A test agent", &delivery, &[]).unwrap();
+        let prompt =
+            prepare_delivery_prompt("ag_123", "Agent", "A test agent", &delivery, &[]).unwrap();
         assert!(prompt.contains("can you help?"));
         assert!(prompt.contains("@alice"));
         assert!(prompt.contains("#general"));
@@ -2532,7 +2791,8 @@ mod tests {
                 "channel_name": "dev",
             }
         });
-        let prompt = prepare_delivery_prompt("ag_123", "Coder", "Fixes bugs", &delivery, &[]).unwrap();
+        let prompt =
+            prepare_delivery_prompt("ag_123", "Coder", "Fixes bugs", &delivery, &[]).unwrap();
         assert!(prompt.contains("You are Coder. Fixes bugs"));
         assert!(prompt.contains("[target=#dev msg=msg_abc"));
         assert!(prompt.contains("type=human] @bob: fix the bug"));
@@ -2560,8 +2820,11 @@ mod tests {
                 ]
             }
         });
-        let prompt = prepare_delivery_prompt("ag_123", "Arnold", "Marketing agent", &delivery, &[]).unwrap();
-        assert!(prompt.contains("[1 attachment: kickstarter-to-production.md (id:908ec5ab-4f0e-4cc6-8afb-443175b37e05)"));
+        let prompt =
+            prepare_delivery_prompt("ag_123", "Arnold", "Marketing agent", &delivery, &[]).unwrap();
+        assert!(prompt.contains(
+            "[1 attachment: kickstarter-to-production.md (id:908ec5ab-4f0e-4cc6-8afb-443175b37e05)"
+        ));
         assert!(prompt.contains("raft attachment view"));
     }
 
@@ -2586,7 +2849,8 @@ mod tests {
                 ]
             }
         });
-        let prompt = prepare_delivery_prompt("ag_123", "Arnold", "Marketing agent", &delivery, &[]).unwrap();
+        let prompt =
+            prepare_delivery_prompt("ag_123", "Arnold", "Marketing agent", &delivery, &[]).unwrap();
         assert!(prompt.contains("doc.md (id:doc-id)"));
         assert!(prompt.contains("@jared:"));
     }

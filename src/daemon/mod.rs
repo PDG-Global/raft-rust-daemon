@@ -28,6 +28,7 @@ pub mod computer;
 pub mod message;
 pub mod paths;
 pub mod pidfile;
+pub mod proxy;
 pub mod reminder;
 pub mod runner;
 pub mod runtime;

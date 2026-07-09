@@ -482,8 +482,12 @@ pub async fn execute_command(command: &CliCommand) -> Result<()> {
             DaemonCommand::Restart { profile } => {
                 // Restart needs the same opts as start; without re-parsing
                 // we can only stop. Print guidance.
-                println!("Use `raft-daemon --profile {profile} stop` then `raft-daemon --profile {profile} --server-url <url> --api-key <key> start` to restart with updated options.");
-                println!("(Restart reuses server URL / API key from the previous invocation, which is not yet stored.)");
+                println!(
+                    "Use `raft-daemon --profile {profile} stop` then `raft-daemon --profile {profile} --server-url <url> --api-key <key> start` to restart with updated options."
+                );
+                println!(
+                    "(Restart reuses server URL / API key from the previous invocation, which is not yet stored.)"
+                );
             }
             DaemonCommand::Status { profile } => match runner::status(profile)? {
                 StatusReport::Running(pid) => {

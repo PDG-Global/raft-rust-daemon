@@ -20,8 +20,8 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -31,13 +31,17 @@ use tokio::process::Command;
 use tokio::time::timeout;
 use tracing::{info, warn};
 
-use crate::daemon::runner::starts_with_no_reply_marker;
 use crate::daemon::paths;
+use crate::daemon::runner::starts_with_no_reply_marker;
 
 /// Maximum time a single RustyCLI turn is allowed to run before the daemon
 /// kills it and returns an error. Prevents a hung tool/LLM call from blocking
 /// the agent forever.
 const RUSTY_TURN_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Active capabilities advertised to RustyCLI via `SLOCK_AGENT_ACTIVE_CAPABILITIES`.
+const DEFAULT_ACTIVE_CAPABILITIES: &str =
+    "send,read,mentions,tasks,reactions,server,channels,knowledge";
 
 /// Per-agent runtime state.
 ///
@@ -88,6 +92,16 @@ pub struct AgentProcess {
     /// the npm daemon's `nextActivityClientSeq` so the server can correlate
     /// lifecycle events and detect stale activity.
     pub activity_client_seq: Arc<AtomicU64>,
+    /// Short-lived proxy token used by the bundled `raft`/`slock` CLI tools
+    /// to authenticate against this daemon's local agent-api proxy.
+    pub agent_proxy_token: Option<String>,
+    /// Path to the file holding `agent_proxy_token`, written with `0o600`
+    /// permissions so the CLI can read it.
+    pub agent_proxy_token_file: Option<PathBuf>,
+    /// Local agent-api proxy URL passed to RustyCLI via `SLOCK_AGENT_PROXY_URL`.
+    pub proxy_url: Option<String>,
+    /// Raft server URL passed to RustyCLI via `SLOCK_SERVER_URL`.
+    pub server_url: Option<String>,
     /// Lock that serializes RustyCLI turns for this agent. RustyCLI keeps a
     /// per-agent task registry (SQLite) in the workspace; running two
     /// invocations concurrently causes "database is locked" errors. The lock
@@ -148,12 +162,12 @@ impl AgentProcess {
             .to_string();
         let workspace = workspace_for(agent_id, home);
 
-    info!(
-        agent_id = agent_id,
-        name = %name,
-        description = %description,
-        "agent identity resolved from start config"
-    );
+        info!(
+            agent_id = agent_id,
+            name = %name,
+            description = %description,
+            "agent identity resolved from start config"
+        );
 
         // LLM provider block: `config.provider.{providerId, apiKey, baseUrl}`.
         // We parse defensively because the server may send the block under a
@@ -164,30 +178,30 @@ impl AgentProcess {
         let preset = pick_rustycli_preset(provider_id, Some(&model));
         let creds = resolve_llm_credentials(Some(&provider_config), provider_id, preset);
 
-    info!(
-        agent_id = agent_id,
-        api_key_source = %creds.api_key_source.unwrap_or(CredentialSource::Missing),
-        base_url = ?creds.base_url.as_deref(),
-        base_url_source = %creds.base_url_source.unwrap_or(CredentialSource::Missing),
-        preset = ?preset,
-        env_vars_checked = ?env_var_candidates(provider_id, preset),
-        "resolved LLM credentials",
-    );
-
-    // If we ended up with no key, surface an actionable hint so the operator
-    // knows exactly which env vars we looked for — these are the same names
-    // rusty itself checks, in priority order.
-    if creds.api_key.is_none() {
-        let candidates = env_var_candidates(provider_id, preset);
-        let env_list = candidates.join(", ");
-        warn!(
+        info!(
             agent_id = agent_id,
-            env_vars = %env_list,
-            "no LLM API key found for agent; spawn will likely fail at auth. \
-             Set one of these env vars (or run `rusty --setup` to populate \
-             ~/.rusty/settings.json).",
+            api_key_source = %creds.api_key_source.unwrap_or(CredentialSource::Missing),
+            base_url = ?creds.base_url.as_deref(),
+            base_url_source = %creds.base_url_source.unwrap_or(CredentialSource::Missing),
+            preset = ?preset,
+            env_vars_checked = ?env_var_candidates(provider_id, preset),
+            "resolved LLM credentials",
         );
-    }
+
+        // If we ended up with no key, surface an actionable hint so the operator
+        // knows exactly which env vars we looked for — these are the same names
+        // rusty itself checks, in priority order.
+        if creds.api_key.is_none() {
+            let candidates = env_var_candidates(provider_id, preset);
+            let env_list = candidates.join(", ");
+            warn!(
+                agent_id = agent_id,
+                env_vars = %env_list,
+                "no LLM API key found for agent; spawn will likely fail at auth. \
+                 Set one of these env vars (or run `rusty --setup` to populate \
+                 ~/.rusty/settings.json).",
+            );
+        }
 
         // Best-effort: create the workspace now so the first spawn doesn't
         // fail on a missing cwd.
@@ -215,6 +229,10 @@ impl AgentProcess {
             provider_id: provider_config.provider_id,
             agent_credential_key: None,
             agent_credential_id: None,
+            agent_proxy_token: None,
+            agent_proxy_token_file: None,
+            proxy_url: None,
+            server_url: None,
             activity_client_seq: Arc::new(AtomicU64::new(0)),
             turn_lock: Arc::new(tokio::sync::Mutex::new(())),
         })
@@ -263,7 +281,10 @@ impl ProviderConfig {
         }
 
         // 2. config.runtimeConfig.provider
-        if let Some(obj) = config.pointer("/runtimeConfig/provider").and_then(|v| v.as_object()) {
+        if let Some(obj) = config
+            .pointer("/runtimeConfig/provider")
+            .and_then(|v| v.as_object())
+        {
             let extracted = Self::from_object(obj);
             if extracted.provider_id.is_some() || extracted.api_key.is_some() {
                 return extracted;
@@ -296,7 +317,11 @@ impl ProviderConfig {
 /// candidate keys.
 fn read_str(obj: &serde_json::Map<String, serde_json::Value>, keys: &[&str]) -> Option<String> {
     for key in keys {
-        if let Some(s) = obj.get(*key).and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+        if let Some(s) = obj
+            .get(*key)
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+        {
             return Some(s.to_string());
         }
     }
@@ -314,7 +339,10 @@ fn read_str(obj: &serde_json::Map<String, serde_json::Value>, keys: &[&str]) -> 
 ///
 /// Returns `None` for providers without a rusty preset (e.g. Anthropic);
 /// in that case the caller can still fall back to `--api-base`.
-pub fn pick_rustycli_preset(provider_id: Option<&str>, model: Option<&str>) -> Option<&'static str> {
+pub fn pick_rustycli_preset(
+    provider_id: Option<&str>,
+    model: Option<&str>,
+) -> Option<&'static str> {
     let pid = provider_id.unwrap_or("").to_ascii_lowercase();
     let mdl = model.unwrap_or("").to_ascii_lowercase();
 
@@ -600,8 +628,13 @@ fn migrate_notes_dir(src: &Path, dst: &Path) -> Result<()> {
         let src_path = entry.path();
         let dst_path = dst.join(entry.file_name());
         if src_path.is_file() && !dst_path.exists() {
-            std::fs::copy(&src_path, &dst_path)
-                .with_context(|| format!("copying note {} to {}", src_path.display(), dst_path.display()))?;
+            std::fs::copy(&src_path, &dst_path).with_context(|| {
+                format!(
+                    "copying note {} to {}",
+                    src_path.display(),
+                    dst_path.display()
+                )
+            })?;
         }
     }
     Ok(())
@@ -620,7 +653,9 @@ fn build_initial_memory_md(name: &str, description: &str) -> String {
 fn user_home_dir_from_env() -> Option<PathBuf> {
     #[cfg(unix)]
     {
-        std::env::var_os("HOME").filter(|h| !h.is_empty()).map(PathBuf::from)
+        std::env::var_os("HOME")
+            .filter(|h| !h.is_empty())
+            .map(PathBuf::from)
     }
     #[cfg(not(unix))]
     {
@@ -696,6 +731,18 @@ impl AgentProcessRegistry {
     pub fn agent_ids(&self) -> Vec<String> {
         self.processes.iter().map(|kv| kv.key().clone()).collect()
     }
+
+    /// Look up an agent by its local proxy bearer token.
+    pub fn find_by_proxy_token(&self, token: &str) -> Option<AgentProcess> {
+        self.processes.iter().find_map(|kv| {
+            let process = kv.value();
+            if process.agent_proxy_token.as_deref() == Some(token) {
+                Some(process.clone())
+            } else {
+                None
+            }
+        })
+    }
 }
 
 /// Resolve the RustyCLI binary path.
@@ -740,6 +787,11 @@ pub async fn run_one_turn(process: &AgentProcess, prompt: &str) -> Result<String
         .arg(prompt)
         .arg("--cwd")
         .arg(&process.workspace)
+        .env("SLOCK_AGENT_ID", &process.agent_id)
+        .env(
+            "SLOCK_AGENT_ACTIVE_CAPABILITIES",
+            DEFAULT_ACTIVE_CAPABILITIES,
+        )
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -762,6 +814,15 @@ pub async fn run_one_turn(process: &AgentProcess, prompt: &str) -> Result<String
         // the env var is OpenAI-specific and would force OpenAI semantics
         // even when --preset points at a different provider.
         cmd.arg("--api-key").arg(key);
+    }
+    if let Some(server_url) = &process.server_url {
+        cmd.env("SLOCK_SERVER_URL", server_url);
+    }
+    if let Some(proxy_url) = &process.proxy_url {
+        cmd.env("SLOCK_AGENT_PROXY_URL", proxy_url);
+    }
+    if let Some(token_file) = &process.agent_proxy_token_file {
+        cmd.env("SLOCK_AGENT_PROXY_TOKEN_FILE", token_file);
     }
 
     info!(
@@ -861,9 +922,7 @@ pub async fn run_one_turn(process: &AgentProcess, prompt: &str) -> Result<String
 
     if !status.success() {
         if stdout.trim().is_empty() {
-            anyhow::bail!(
-                "rusty exited status={status} — stderr: {stderr} — stdout: {stdout}"
-            );
+            anyhow::bail!("rusty exited status={status} — stderr: {stderr} — stdout: {stdout}");
         }
         // RustyCLI may emit a model response on stdout even when it exits
         // non-zero due to a follow-up tool/API error. In that case the useful
@@ -1015,9 +1074,13 @@ mod tests {
         std::fs::write(legacy_agent.join("notes").join("legacy-note.md"), "note\n").unwrap();
 
         let daemon_home = tmp.path().join("raft-daemon");
-        let p = AgentProcess::from_start(agent_id, &serde_json::json!({}), None, &daemon_home).unwrap();
+        let p =
+            AgentProcess::from_start(agent_id, &serde_json::json!({}), None, &daemon_home).unwrap();
 
-        assert_eq!(std::fs::read_to_string(p.workspace.join("MEMORY.md")).unwrap(), "# Legacy memory\n");
+        assert_eq!(
+            std::fs::read_to_string(p.workspace.join("MEMORY.md")).unwrap(),
+            "# Legacy memory\n"
+        );
         assert!(p.workspace.join("notes").join("legacy-note.md").exists());
     }
 
@@ -1053,6 +1116,10 @@ mod tests {
             provider_id: None,
             agent_credential_key: None,
             agent_credential_id: None,
+            agent_proxy_token: None,
+            agent_proxy_token_file: None,
+            proxy_url: None,
+            server_url: None,
             activity_client_seq: Arc::new(AtomicU64::new(0)),
             turn_lock: Arc::new(tokio::sync::Mutex::new(())),
         };
@@ -1101,7 +1168,10 @@ mod tests {
 
     #[test]
     fn pick_preset_returns_none_for_unknown() {
-        assert_eq!(pick_rustycli_preset(Some("anthropic"), Some("claude-3")), None);
+        assert_eq!(
+            pick_rustycli_preset(Some("anthropic"), Some("claude-3")),
+            None
+        );
         assert_eq!(pick_rustycli_preset(None, Some("some-custom-model")), None);
     }
 
@@ -1217,7 +1287,10 @@ mod tests {
         assert_eq!(p.kind.as_deref(), Some("gateway"));
         assert_eq!(p.provider_id.as_deref(), Some("openai-compatible"));
         assert_eq!(p.api_key.as_deref(), Some("sk-openai"));
-        assert_eq!(p.base_url.as_deref(), Some("https://gateway.example.com/v1"));
+        assert_eq!(
+            p.base_url.as_deref(),
+            Some("https://gateway.example.com/v1")
+        );
     }
 
     #[test]

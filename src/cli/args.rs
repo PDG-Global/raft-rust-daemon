@@ -146,7 +146,8 @@ impl CliArgs {
         use chrono::NaiveTime;
         use std::time::Duration;
         let parse_time = |s: &Option<String>| -> Option<NaiveTime> {
-            s.as_ref().and_then(|t| NaiveTime::parse_from_str(t, "%H:%M").ok())
+            s.as_ref()
+                .and_then(|t| NaiveTime::parse_from_str(t, "%H:%M").ok())
         };
         crate::daemon::update::UpdateOptions {
             enabled: self.auto_update,

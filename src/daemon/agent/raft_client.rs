@@ -98,7 +98,12 @@ pub struct SendResponse {
 /// headers. Operators who need proxy egress for `api.raft.build` can opt
 /// back in once we add explicit per-host proxy configuration; for now,
 /// direct connect is the safer default.
-fn raft_http_client() -> Result<reqwest::Client> {
+///
+/// # Errors
+///
+/// Returns an error if the `reqwest` client builder fails (e.g., the TLS
+/// backend cannot be initialised).
+pub fn raft_http_client() -> Result<reqwest::Client> {
     reqwest::Client::builder()
         .user_agent(format!("raft-daemon/{}", env!("CARGO_PKG_VERSION")))
         .no_proxy()

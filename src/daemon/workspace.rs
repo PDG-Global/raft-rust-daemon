@@ -34,10 +34,7 @@ pub struct WorkspaceManager {
 
 impl WorkspaceManager {
     /// Create a new workspace manager.
-    pub fn new(
-        state_manager: Arc<dyn crate::daemon::state::StateMgr>,
-        workspace: PathBuf,
-    ) -> Self {
+    pub fn new(state_manager: Arc<dyn crate::daemon::state::StateMgr>, workspace: PathBuf) -> Self {
         Self {
             workspaces: DashMap::new(),
             state_manager,

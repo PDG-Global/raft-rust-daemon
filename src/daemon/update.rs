@@ -8,20 +8,20 @@
 //! (no active agent turns) and, optionally, during configured quiet hours.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use chrono::{Local, NaiveTime};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use tokio::time::interval;
-use tracing::{info, warn};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
+use tokio::time::interval;
+use tracing::{info, warn};
 
 const GITHUB_API_LATEST: &str =
     "https://api.github.com/repos/PDG-Global/raft-rust-daemon/releases/latest";
@@ -85,7 +85,10 @@ pub fn current_version() -> &'static str {
 }
 
 fn is_newer_version(current: &str, latest: &str) -> bool {
-    match (semver::Version::parse(current), semver::Version::parse(latest)) {
+    match (
+        semver::Version::parse(current),
+        semver::Version::parse(latest),
+    ) {
         (Ok(c), Ok(l)) => l > c,
         _ => false,
     }
@@ -151,7 +154,10 @@ async fn download_file(url: &str, dest: &Path) -> Result<()> {
         anyhow::bail!("download failed: {}", response.status());
     }
 
-    let bytes = response.bytes().await.context("failed to read download body")?;
+    let bytes = response
+        .bytes()
+        .await
+        .context("failed to read download body")?;
     tokio::fs::write(dest, bytes).await?;
     Ok(())
 }
@@ -177,8 +183,7 @@ async fn sha256_of_file(path: &Path) -> Result<String> {
 pub async fn perform_update(info: ReleaseInfo, current_exe: &Path) -> Result<()> {
     info!(
         "auto-update: downloading version {} ({})",
-        info.version,
-        info.asset_name
+        info.version, info.asset_name
     );
 
     let temp_dir = std::env::temp_dir().join(format!("raft-daemon-update-{}", info.version));
@@ -220,9 +225,7 @@ pub async fn perform_update(info: ReleaseInfo, current_exe: &Path) -> Result<()>
     info!("auto-update: binary replaced; restarting daemon");
 
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let err = std::process::Command::new(current_exe)
-        .args(&args)
-        .exec();
+    let err = std::process::Command::new(current_exe).args(&args).exec();
 
     anyhow::bail!("failed to restart daemon: {err}")
 }
