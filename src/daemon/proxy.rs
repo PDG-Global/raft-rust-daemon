@@ -251,6 +251,7 @@ mod tests {
             runtime: "builtin".into(),
             model: "gpt-4o".into(),
             workspace: PathBuf::from("/tmp"),
+            home: PathBuf::from("/tmp"),
             session_id: None,
             launch_id: None,
             llm_api_key: None,

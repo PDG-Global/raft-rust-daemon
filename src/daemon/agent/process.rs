@@ -18,6 +18,7 @@
 //! - `workspace` — per-agent working directory under
 //!   `<home>/agents/<agent_id>/`, created on start.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -62,6 +63,8 @@ pub struct AgentProcess {
     pub model: String,
     /// Per-agent workspace directory.
     pub workspace: PathBuf,
+    /// Daemon home directory (used for agent-wide paths like the CLI wrappers).
+    pub home: PathBuf,
     /// RustyCLI session ID for `--resume`. `None` until the agent has been
     /// invoked at least once and we've observed a session.
     pub session_id: Option<String>,
@@ -222,6 +225,7 @@ impl AgentProcess {
             runtime,
             model,
             workspace,
+            home: home.to_path_buf(),
             session_id: None,
             launch_id: launch_id.and_then(|v| v.as_str()).map(str::to_string),
             llm_api_key: creds.api_key,
@@ -825,6 +829,15 @@ pub async fn run_one_turn(process: &AgentProcess, prompt: &str) -> Result<String
         cmd.env("SLOCK_AGENT_PROXY_TOKEN_FILE", token_file);
     }
 
+    let bin_dir = process.home.join("bin");
+    let existing_path = std::env::var("PATH").unwrap_or_default();
+    let mut path_parts = std::env::split_paths(&existing_path).collect::<Vec<_>>();
+    path_parts.insert(0, bin_dir.clone());
+    let new_path = std::env::join_paths(path_parts)
+        .unwrap_or_else(|_| OsString::from(&existing_path));
+    cmd.env("SLOCK_CLI", bin_dir.join("raft"))
+        .env("PATH", new_path);
+
     info!(
         agent_id = %process.agent_id,
         binary = %binary.display(),
@@ -1109,6 +1122,7 @@ mod tests {
             runtime: "builtin".into(),
             model: "sonnet".into(),
             workspace: tmp.path().join("ag_a"),
+            home: tmp.path().to_path_buf(),
             session_id: None,
             launch_id: None,
             llm_api_key: None,

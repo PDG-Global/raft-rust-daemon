@@ -367,6 +367,17 @@ async fn run_foreground(opts: DaemonOptions) -> Result<()> {
         warn!(error = %err, "failed to create agents dir; agent starts will fail");
     }
 
+    // Write generic `raft`/`slock` wrapper scripts so RustyCLI can invoke the
+    // agent API without requiring the raft CLI binaries to be on PATH.
+    match crate::cli::raft_cli::ensure_cli_wrappers(&home) {
+        Ok(bin_dir) => {
+            info!(bin_dir = %bin_dir.display(), "wrote raft/slock wrappers");
+        }
+        Err(err) => {
+            warn!(error = %err, "failed to write raft/slock wrappers; agent CLI may not work");
+        }
+    }
+
     let agents: Arc<AgentProcessRegistry> = Arc::new(AgentProcessRegistry::new());
     let active_turns: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
 
@@ -1783,6 +1794,7 @@ fn prepare_delivery_prompt(
              - This is a direct message to you from @{sender_name}. You MUST respond.\n\
              - Respond as {name} in a natural, conversational tone. Your reply should read like a person replying to the last message, not a stream-of-consciousness log.\n\
              - Do not narrate your internal tool steps (e.g. \"Let me check...\", \"Found the issue...\", \"Build succeeded...\"). Do the work silently, then summarize what you did or ask a clarifying question.\n\
+             - You have access to the `raft` CLI in this workspace. Use it to create reminders (`raft reminder create --title \"...\" --fire-at \"...\"`), manage tasks (`raft task ...`), read your inbox, and send messages. When asked to set a reminder or task, invoke the CLI rather than saying you cannot do it.\n\
              - Do NOT push to git, deploy, or run any externally-visible command unless the user explicitly asked you to. If you are unsure whether to push/deploy, ask first.\n\
              - The sender is the person you are talking to. If they ask you to do something within your role, do it or ask clarifying questions. Never respond with \"that's [someone's] job\" or refuse on the basis that another person should do it.\n\
              - Do not output `{NO_REPLY_MARKER}` for any direct message unless it is clearly spam or completely unrelated to your role.\n\
@@ -1796,6 +1808,7 @@ fn prepare_delivery_prompt(
              - You are in a team channel. If this message is addressed to you, the team, the channel, or falls within your role, respond helpfully and concisely.\n\
              - Respond as {name} in a natural, conversational tone. Your reply should read like a person replying to the last message, not a stream-of-consciousness log.\n\
              - Do not narrate your internal tool steps (e.g. \"Let me check...\", \"Found the issue...\", \"Build succeeded...\"). Do the work silently, then summarize what you did or ask a clarifying question.\n\
+             - You have access to the `raft` CLI in this workspace. Use it to create reminders (`raft reminder create --title \"...\" --fire-at \"...\"`), manage tasks (`raft task ...`), read your inbox, and send messages. When asked to set a reminder or task, invoke the CLI rather than saying you cannot do it.\n\
              - Do NOT push to git, deploy, or run any externally-visible command unless the user explicitly asked you to. If you are unsure whether to push/deploy, ask first.\n\
              - The sender @{sender_name} is the person you are talking to. If they ask you to do something within your role, do it or ask clarifying questions. Never respond with \"that's [someone's] job\" or refuse on the basis that another person should do it.\n\
              - Only output `{NO_REPLY_MARKER}` for messages that are clearly irrelevant, private side-conversations, or do not require your input.\n\

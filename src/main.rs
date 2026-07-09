@@ -21,6 +21,18 @@ async fn main() -> Result<()> {
     // provider is already installed, in which case we keep the existing one.
     let _ = rustls::crypto::ring::default_provider().install_default();
 
+    // argv[0] dispatch: if the binary is invoked as `raft` or `slock` (e.g.
+    // via a symlink), run the bundled agent-facing CLI directly.
+    if let Some(argv0) = std::env::args_os().next().map(std::path::PathBuf::from) {
+        if argv0
+            .file_stem()
+            .is_some_and(|stem| stem == "raft" || stem == "slock")
+        {
+            let args: Vec<String> = std::env::args().skip(1).collect();
+            return cli::raft_cli::run_cli(&args).await;
+        }
+    }
+
     // Parse CLI args.
     let args = CliArgs::parse_from(std::env::args_os());
 
@@ -69,6 +81,14 @@ async fn main() -> Result<()> {
         // === agent subcommands ===
         Some("agent") => {
             let command = parse_agent_command(&args.command);
+            cli::commands::execute_command(&command).await?;
+        }
+
+        // === bundled raft/slock CLI ===
+        Some("cli") => {
+            let command = CliCommand::AgentApiCli {
+                args: args.command.iter().skip(1).cloned().collect(),
+            };
             cli::commands::execute_command(&command).await?;
         }
 

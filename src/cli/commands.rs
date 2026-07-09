@@ -70,6 +70,12 @@ pub enum CliCommand {
         #[command(subcommand)]
         command: DebugCommand,
     },
+    /// Invoke the bundled agent-facing `raft`/`slock` CLI.
+    AgentApiCli {
+        /// Arguments to pass through to the agent CLI.
+        #[arg(trailing_var_arg = true)]
+        args: Vec<String>,
+    },
 }
 
 /// Daemon commands.
@@ -747,6 +753,9 @@ pub async fn execute_command(command: &CliCommand) -> Result<()> {
                 println!("Version: {}", env!("CARGO_PKG_VERSION"));
             }
         },
+        CliCommand::AgentApiCli { args } => {
+            crate::cli::raft_cli::run_cli(args).await?;
+        }
     }
     Ok(())
 }

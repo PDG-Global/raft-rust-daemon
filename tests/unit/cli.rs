@@ -75,3 +75,17 @@ fn test_cli_command_server_create() {
         _ => panic!("Expected Server::Create"),
     }
 }
+
+#[test]
+fn test_cli_command_agent_api_cli() {
+    let command = CliCommand::AgentApiCli {
+        args: vec!["message".to_string(), "send".to_string()],
+    };
+
+    match command {
+        CliCommand::AgentApiCli { args } => {
+            assert_eq!(args, vec!["message", "send"]);
+        }
+        _ => panic!("Expected AgentApiCli"),
+    }
+}
