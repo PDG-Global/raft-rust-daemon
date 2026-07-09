@@ -186,7 +186,8 @@ fn resolve_config() -> Result<(String, String)> {
     ) {
         let token = std::fs::read_to_string(&token_file)
             .with_context(|| format!("reading proxy token file {token_file}"))?;
-        return Ok((proxy_url, token.trim().to_string()));
+        let base = format!("{}/internal/agent-api", proxy_url.trim_end_matches('/'));
+        return Ok((base, token.trim().to_string()));
     }
 
     if let (Ok(server_url), Ok(token_file)) = (
