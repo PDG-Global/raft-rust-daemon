@@ -20,15 +20,23 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use dashmap::DashMap;
+use tokio::io::AsyncReadExt;
 use tokio::process::Command;
+use tokio::time::timeout;
 use tracing::{info, warn};
 
 use crate::daemon::paths;
+
+/// Maximum time a single RustyCLI turn is allowed to run before the daemon
+/// kills it and returns an error. Prevents a hung tool/LLM call from blocking
+/// the agent forever.
+const RUSTY_TURN_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Per-agent runtime state.
 ///
@@ -770,18 +778,78 @@ pub async fn run_one_turn(process: &AgentProcess, prompt: &str) -> Result<String
         prompt = %prompt,
         "RustyCLI prompt",
     );
-    let output = cmd
-        .output()
-        .await
+
+    let mut child = cmd
+        .spawn()
         .with_context(|| format!("spawning RustyCLI at {}", binary.display()))?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
+    // Read stdout/stderr in the background so we can still collect partial
+    // output if the turn times out and we have to kill the child.
+    let mut stdout = child.stdout.take().context("capturing RustyCLI stdout")?;
+    let mut stderr = child.stderr.take().context("capturing RustyCLI stderr")?;
+    let stdout_task = tokio::spawn(async move {
+        let mut buf = Vec::new();
+        let _ = stdout.read_to_end(&mut buf).await;
+        buf
+    });
+    let stderr_task = tokio::spawn(async move {
+        let mut buf = Vec::new();
+        let _ = stderr.read_to_end(&mut buf).await;
+        buf
+    });
+
+    let status = timeout(RUSTY_TURN_TIMEOUT, child.wait())
+        .await
+        .map_err(|_| {
+            warn!(
+                agent_id = %process.agent_id,
+                timeout_secs = RUSTY_TURN_TIMEOUT.as_secs(),
+                "RustyCLI turn timed out; killing process"
+            );
+        });
+
+    let output = match status {
+        Ok(Ok(status)) => {
+            let stdout = stdout_task.await.unwrap_or_default();
+            let stderr = stderr_task.await.unwrap_or_default();
+            (status, stdout, stderr)
+        }
+        Ok(Err(err)) => {
+            // Process wait failed; still try to collect output for diagnostics.
+            let _ = stdout_task.await;
+            let _ = stderr_task.await;
+            return Err(err.into());
+        }
+        Err(()) => {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            let stdout = stdout_task.await.unwrap_or_default();
+            let stderr = stderr_task.await.unwrap_or_default();
+            let stdout_str = String::from_utf8_lossy(&stdout);
+            if stdout_str.trim().is_empty() {
+                anyhow::bail!(
+                    "RustyCLI turn timed out after {} seconds",
+                    RUSTY_TURN_TIMEOUT.as_secs()
+                );
+            }
+            warn!(
+                agent_id = %process.agent_id,
+                stdout_len = stdout_str.len(),
+                stderr = %String::from_utf8_lossy(&stderr),
+                "using partial stdout after timeout"
+            );
+            return Ok(stdout_str.trim().to_string());
+        }
+    };
+
+    let status = output.0;
+    let stdout = String::from_utf8_lossy(&output.1);
+    let stderr = String::from_utf8_lossy(&output.2);
+
+    if !status.success() {
         if stdout.trim().is_empty() {
             anyhow::bail!(
-                "rusty exited status={} — stderr: {stderr} — stdout: {stdout}",
-                output.status
+                "rusty exited status={status} — stderr: {stderr} — stdout: {stdout}"
             );
         }
         // RustyCLI may emit a model response on stdout even when it exits
@@ -789,15 +857,14 @@ pub async fn run_one_turn(process: &AgentProcess, prompt: &str) -> Result<String
         // answer is still in stdout, so return it and log the stderr as a warning.
         warn!(
             agent_id = %process.agent_id,
-            status = %output.status,
+            status = %status,
             stderr = %stderr,
             "rusty exited non-zero but produced stdout; using stdout as response"
         );
         return Ok(stdout.trim().to_string());
     }
 
-    let response = String::from_utf8_lossy(&output.stdout).to_string();
-    Ok(response.trim().to_string())
+    Ok(stdout.trim().to_string())
 }
 
 /// Convenience: ensure the agents directory exists under the daemon home.
