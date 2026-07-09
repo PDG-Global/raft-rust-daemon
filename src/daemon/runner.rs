@@ -1554,7 +1554,11 @@ fn prepare_delivery_prompt(
     let instruction = if is_dm {
         format!(
             "## Required response behavior\n\n\
-             - This is a direct message to you. You MUST respond.\n\
+             - This is a direct message to you from @{sender_name}. You MUST respond.\n\
+             - Respond as {name} in a natural, conversational tone. Your reply should read like a person replying to the last message, not a stream-of-consciousness log.\n\
+             - Do not narrate your internal tool steps (e.g. \"Let me check...\", \"Found the issue...\", \"Build succeeded...\"). Do the work silently, then summarize what you did or ask a clarifying question.\n\
+             - Do NOT push to git, deploy, or run any externally-visible command unless the user explicitly asked you to. If you are unsure whether to push/deploy, ask first.\n\
+             - The sender is the person you are talking to. If they ask you to do something within your role, do it or ask clarifying questions. Never respond with \"that's [someone's] job\" or refuse on the basis that another person should do it.\n\
              - Do not output `{NO_REPLY_MARKER}` for any direct message unless it is clearly spam or completely unrelated to your role.\n\
              - Messages that mention files, paths, workspace, `notes/`, or ask you to perform actions within your role are ALWAYS relevant. Even if you cannot perform the action directly, acknowledge the message and explain what you can do.\n\
              - This instruction overrides any other guidance about staying silent or minimizing conversation.\n\
@@ -1564,6 +1568,10 @@ fn prepare_delivery_prompt(
         format!(
             "## Required response behavior\n\n\
              - You are in a team channel. If this message is addressed to you, the team, the channel, or falls within your role, respond helpfully and concisely.\n\
+             - Respond as {name} in a natural, conversational tone. Your reply should read like a person replying to the last message, not a stream-of-consciousness log.\n\
+             - Do not narrate your internal tool steps (e.g. \"Let me check...\", \"Found the issue...\", \"Build succeeded...\"). Do the work silently, then summarize what you did or ask a clarifying question.\n\
+             - Do NOT push to git, deploy, or run any externally-visible command unless the user explicitly asked you to. If you are unsure whether to push/deploy, ask first.\n\
+             - The sender @{sender_name} is the person you are talking to. If they ask you to do something within your role, do it or ask clarifying questions. Never respond with \"that's [someone's] job\" or refuse on the basis that another person should do it.\n\
              - Only output `{NO_REPLY_MARKER}` for messages that are clearly irrelevant, private side-conversations, or do not require your input.\n\
              - Do NOT output `{NO_REPLY_MARKER}` for messages that mention files, paths, workspace, `notes/`, or ask you to perform actions within your role. Even if you cannot perform the action directly, acknowledge the message and explain what you can do.\n\
              - This instruction overrides any other guidance about staying silent or minimizing conversation.\n\
