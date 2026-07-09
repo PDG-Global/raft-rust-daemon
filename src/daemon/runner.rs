@@ -1483,8 +1483,18 @@ fn prepare_delivery_prompt(
         .get("content")
         .and_then(|v| v.as_str())
         .unwrap_or("");
-    if content.is_empty() {
-        tracing::debug!(agent_id = %agent_id, "skipping delivery: empty message content");
+    let attachments: &[serde_json::Value] = msg
+        .get("attachments")
+        .and_then(|v| v.as_array())
+        .map_or(&[], |v| v.as_slice());
+    let attachment_suffix = format_attachment_suffix(attachments);
+    let content_with_attachments = if content.is_empty() && !attachment_suffix.is_empty() {
+        attachment_suffix.trim_start().to_string()
+    } else {
+        format!("{content}{attachment_suffix}")
+    };
+    if content_with_attachments.is_empty() {
+        tracing::debug!(agent_id = %agent_id, "skipping delivery: empty message content and no attachments");
         return None;
     }
 
@@ -1559,8 +1569,31 @@ fn prepare_delivery_prompt(
     };
 
     Some(format!(
-        "{context_header}New message received:\n\n[target={target} msg={msg_id} time={time} type={sender_type}] @{sender_name}: {content}\n\n{instruction}"
+        "{context_header}New message received:\n\n[target={target} msg={msg_id} time={time} type={sender_type}] @{sender_name}: {content_with_attachments}\n\n{instruction}"
     ))
+}
+
+/// Format an attachment suffix that mirrors the npm daemon's hint: it lists
+/// each attachment's filename and id, and tells the agent how to download it.
+fn format_attachment_suffix(attachments: &[serde_json::Value]) -> String {
+    if attachments.is_empty() {
+        return String::new();
+    }
+    let list = attachments
+        .iter()
+        .map(|a| {
+            let filename = a.get("filename").and_then(|v| v.as_str()).unwrap_or("unknown");
+            let id = a.get("id").and_then(|v| v.as_str()).unwrap_or("-");
+            format!("{filename} (id:{id})")
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        " [{} attachment{}: {} — use `raft attachment view --id <attachmentId> --output <path>` to download]",
+        attachments.len(),
+        if attachments.len() > 1 { "s" } else { "" },
+        list
+    )
 }
 
 /// Run one RustyCLI turn for an inbound delivery.
@@ -2381,6 +2414,84 @@ mod tests {
         assert!(prompt.contains("[target=#dev msg=msg_abc"));
         assert!(prompt.contains("type=human] @bob: fix the bug"));
         assert!(prompt.contains("You are in a team channel"));
+    }
+
+    #[test]
+    fn prepare_delivery_prompt_includes_attachment_metadata() {
+        let delivery = serde_json::json!({
+            "message": {
+                "message_id": "msg_att",
+                "content": "[1 attachment]",
+                "sender_id": "user_1",
+                "sender_type": "human",
+                "sender_name": "jared",
+                "channel_type": "channel",
+                "channel_name": "Marketing",
+                "attachments": [
+                    {
+                        "filename": "kickstarter-to-production.md",
+                        "id": "908ec5ab-4f0e-4cc6-8afb-443175b37e05",
+                        "mimeType": "text/markdown",
+                        "sizeBytes": 11931
+                    }
+                ]
+            }
+        });
+        let prompt = prepare_delivery_prompt("ag_123", "Arnold", "Marketing agent", &delivery).unwrap();
+        assert!(prompt.contains("[1 attachment: kickstarter-to-production.md (id:908ec5ab-4f0e-4cc6-8afb-443175b37e05)"));
+        assert!(prompt.contains("raft attachment view"));
+    }
+
+    #[test]
+    fn prepare_delivery_prompt_allows_attachments_without_content() {
+        let delivery = serde_json::json!({
+            "message": {
+                "message_id": "msg_att",
+                "content": "",
+                "sender_id": "user_1",
+                "sender_type": "human",
+                "sender_name": "jared",
+                "channel_type": "channel",
+                "channel_name": "Marketing",
+                "attachments": [
+                    {
+                        "filename": "doc.md",
+                        "id": "doc-id",
+                        "mimeType": "text/markdown",
+                        "sizeBytes": 100
+                    }
+                ]
+            }
+        });
+        let prompt = prepare_delivery_prompt("ag_123", "Arnold", "Marketing agent", &delivery).unwrap();
+        assert!(prompt.contains("doc.md (id:doc-id)"));
+        assert!(prompt.contains("@jared:"));
+    }
+
+    #[test]
+    fn format_attachment_suffix_empty() {
+        assert_eq!(format_attachment_suffix(&[]), "");
+    }
+
+    #[test]
+    fn format_attachment_suffix_single() {
+        let attachments = vec![serde_json::json!({
+            "filename": "doc.md",
+            "id": "doc-id",
+        })];
+        let suffix = format_attachment_suffix(&attachments);
+        assert!(suffix.contains("[1 attachment: doc.md (id:doc-id)"));
+        assert!(suffix.contains("raft attachment view"));
+    }
+
+    #[test]
+    fn format_attachment_suffix_multiple() {
+        let attachments = vec![
+            serde_json::json!({"filename": "a.md", "id": "id-a"}),
+            serde_json::json!({"filename": "b.md", "id": "id-b"}),
+        ];
+        let suffix = format_attachment_suffix(&attachments);
+        assert!(suffix.contains("[2 attachments: a.md (id:id-a), b.md (id:id-b)"));
     }
 
     #[test]
