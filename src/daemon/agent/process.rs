@@ -31,6 +31,7 @@ use tokio::process::Command;
 use tokio::time::timeout;
 use tracing::{info, warn};
 
+use crate::daemon::runner::starts_with_no_reply_marker;
 use crate::daemon::paths;
 
 /// Maximum time a single RustyCLI turn is allowed to run before the daemon
@@ -826,9 +827,21 @@ pub async fn run_one_turn(process: &AgentProcess, prompt: &str) -> Result<String
             let stdout = stdout_task.await.unwrap_or_default();
             let stderr = stderr_task.await.unwrap_or_default();
             let stdout_str = String::from_utf8_lossy(&stdout);
-            if stdout_str.trim().is_empty() {
+            let trimmed = stdout_str.trim();
+            if trimmed.is_empty() {
                 anyhow::bail!(
                     "RustyCLI turn timed out after {} seconds",
+                    RUSTY_TURN_TIMEOUT.as_secs()
+                );
+            }
+            // Partial output from a timed-out process may begin with the
+            // NO_REPLY marker if the model was still emitting its internal
+            // reasoning. Treat that as a timeout error so the agent posts a
+            // fallback message instead of silently suppressing the partial
+            // output as a normal "no reply".
+            if starts_with_no_reply_marker(trimmed) {
+                anyhow::bail!(
+                    "RustyCLI turn timed out after {} seconds; partial response began with NO_REPLY marker",
                     RUSTY_TURN_TIMEOUT.as_secs()
                 );
             }

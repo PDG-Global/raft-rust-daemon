@@ -60,7 +60,7 @@ const NO_REPLY_MARKER: &str = "NO_REPLY";
 /// Returns true if the trimmed response starts with the `NO_REPLY` marker,
 /// case-insensitive. If the model emits the marker, the entire response is
 /// discarded rather than posted to raft.
-fn starts_with_no_reply_marker(s: &str) -> bool {
+pub(crate) fn starts_with_no_reply_marker(s: &str) -> bool {
     let s = s.trim();
     s.len() >= NO_REPLY_MARKER.len()
         && s[..NO_REPLY_MARKER.len()]
@@ -1811,6 +1811,8 @@ fn rustycli_error_message(err: &anyhow::Error) -> &'static str {
         || s.contains("unauthorized")
     {
         "I can't respond right now because the API key for this agent is invalid or missing. Please check the agent's API key configuration."
+    } else if s.contains("timed out") || s.contains("timeout") {
+        "Sorry, that took too long and timed out. Please try again with a simpler request."
     } else {
         "Sorry, I ran into a problem while processing that request. Please try again."
     }
@@ -2631,6 +2633,22 @@ mod tests {
         let err = anyhow::anyhow!("Error: Auth error: HTTP 401: invalid_api_key");
         let msg = rustycli_error_message(&err);
         assert!(msg.contains("API key"), "got: {msg}");
+    }
+
+    #[test]
+    fn rustycli_error_message_detects_timeout_error() {
+        let err = anyhow::anyhow!("RustyCLI turn timed out after 120 seconds");
+        let msg = rustycli_error_message(&err);
+        assert!(msg.contains("too long"), "got: {msg}");
+    }
+
+    #[test]
+    fn rustycli_error_message_detects_no_reply_timeout_error() {
+        let err = anyhow::anyhow!(
+            "RustyCLI turn timed out after 120 seconds; partial response began with NO_REPLY marker"
+        );
+        let msg = rustycli_error_message(&err);
+        assert!(msg.contains("too long"), "got: {msg}");
     }
 
     #[test]
