@@ -212,8 +212,8 @@ pub async fn send_agent_message(
 
 /// Download an attachment's bytes from the raft server.
 ///
-/// Uses the daemon's machine API key (the `sk_…` one) to authenticate against
-/// `/internal/agent-api/attachments/<attachmentId>`.
+/// Uses the provided API key (typically the agent's `sk_agent_…` runner
+/// credential) to authenticate against `/internal/agent-api/attachments/<attachmentId>`.
 ///
 /// # Errors
 ///
@@ -221,7 +221,7 @@ pub async fn send_agent_message(
 /// response bytes cannot be read.
 pub async fn download_attachment(
     server_url: &str,
-    daemon_api_key: &str,
+    api_key: &str,
     attachment_id: &str,
 ) -> Result<Vec<u8>> {
     let client = raft_http_client()?;
@@ -234,7 +234,7 @@ pub async fn download_attachment(
 
     let resp = client
         .get(&url)
-        .bearer_auth(daemon_api_key)
+        .bearer_auth(api_key)
         .header("X-Slock-Client", "raft-daemon-rust")
         .send()
         .await

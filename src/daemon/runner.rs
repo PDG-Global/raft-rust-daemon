@@ -841,7 +841,6 @@ async fn handle_server_message(
             let agents_clone = Arc::clone(agents);
             let outbound_clone = outbound.clone();
             let server_url_clone = server_url.to_string();
-            let api_key_clone = api_key.to_string();
             let launch_id_clone = launch_id.clone();
             let agent_id_for_task = agent_id.clone();
             let delivery_clone = value.clone();
@@ -853,7 +852,6 @@ async fn handle_server_message(
                     &agent_id_for_task,
                     &delivery_clone,
                     &server_url_clone,
-                    &api_key_clone,
                     launch_id_clone.as_deref(),
                     &outbound_clone,
                 )
@@ -1605,7 +1603,7 @@ struct DownloadedAttachment {
 async fn download_delivery_attachments(
     delivery: &serde_json::Value,
     server_url: &str,
-    daemon_api_key: &str,
+    agent_api_key: Option<&str>,
     workspace: &std::path::Path,
 ) -> Vec<DownloadedAttachment> {
     let attachments: &[serde_json::Value] = delivery
@@ -1615,6 +1613,11 @@ async fn download_delivery_attachments(
     if attachments.is_empty() {
         return Vec::new();
     }
+
+    let Some(agent_api_key) = agent_api_key else {
+        warn!("skipping attachment download: no agent credential available");
+        return Vec::new();
+    };
 
     let notes_dir = workspace.join("notes");
     if let Err(err) = tokio::fs::create_dir_all(&notes_dir).await {
@@ -1633,7 +1636,7 @@ async fn download_delivery_attachments(
             .map_or_else(|| format!("attachment-{id}"), sanitize_attachment_filename);
         let path = notes_dir.join(&filename);
 
-        match download_attachment(server_url, daemon_api_key, id).await {
+        match download_attachment(server_url, agent_api_key, id).await {
             Ok(bytes) => {
                 match tokio::fs::write(&path, &bytes).await {
                     Ok(()) => {
@@ -1708,7 +1711,6 @@ async fn run_agent_turn(
     agent_id: &str,
     delivery: &serde_json::Value,
     server_url: &str,
-    daemon_api_key: &str,
     launch_id: Option<&str>,
     outbound: &mpsc::Sender<WsMessage>,
 ) {
@@ -1724,11 +1726,13 @@ async fn run_agent_turn(
     };
 
     // Download any attachments before building the prompt so the agent sees
-    // the files in its workspace and can reference them in its reply.
+    // the files in its workspace and can reference them in its reply. The
+    // attachment endpoint requires an agent credential, not the machine key.
+    let agent_key = process.agent_credential_key.as_deref();
     let downloaded = download_delivery_attachments(
         delivery,
         server_url,
-        daemon_api_key,
+        agent_key,
         &process.workspace,
     )
     .await;
