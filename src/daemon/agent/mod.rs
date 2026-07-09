@@ -12,6 +12,6 @@ pub use process::{
     workspace_for,
 };
 pub use raft_client::{
-    RunnerCredential, SendBody, SendResponse, derive_target, mint_runner_credential,
-    send_agent_message,
+    RunnerCredential, SendBody, SendResponse, derive_target, download_attachment,
+    mint_runner_credential, send_agent_message,
 };

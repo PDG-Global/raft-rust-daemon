@@ -210,6 +210,48 @@ pub async fn send_agent_message(
     resp.json().await.context("decoding send response")
 }
 
+/// Download an attachment's bytes from the raft server.
+///
+/// Uses the daemon's machine API key (the `sk_…` one) to authenticate against
+/// `/internal/agent-api/attachments/<attachmentId>`.
+///
+/// # Errors
+///
+/// Returns an error if the server is unreachable, returns non-2xx, or the
+/// response bytes cannot be read.
+pub async fn download_attachment(
+    server_url: &str,
+    daemon_api_key: &str,
+    attachment_id: &str,
+) -> Result<Vec<u8>> {
+    let client = raft_http_client()?;
+
+    let url = format!(
+        "{}/internal/agent-api/attachments/{}",
+        server_url.trim_end_matches('/'),
+        urlencoding(attachment_id),
+    );
+
+    let resp = client
+        .get(&url)
+        .bearer_auth(daemon_api_key)
+        .header("X-Slock-Client", "raft-daemon-rust")
+        .send()
+        .await
+        .with_context(|| format!("GET {url}"))?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        let text = resp.text().await.unwrap_or_default();
+        anyhow::bail!("attachment download failed: HTTP {status} — {text}");
+    }
+
+    resp.bytes()
+        .await
+        .map(|b| b.to_vec())
+        .context("reading attachment bytes")
+}
+
 /// Best-effort: derive the raft send-target descriptor from an inbound
 /// `agent:deliver` message.
 ///

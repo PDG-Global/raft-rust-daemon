@@ -36,7 +36,7 @@ use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 use crate::daemon::agent::{
-    AgentProcess, AgentProcessRegistry, SendBody, mint_runner_credential,
+    AgentProcess, AgentProcessRegistry, SendBody, download_attachment, mint_runner_credential,
     run_one_turn, send_agent_message, ProviderConfig,
 };
 use crate::daemon::paths;
@@ -841,6 +841,7 @@ async fn handle_server_message(
             let agents_clone = Arc::clone(agents);
             let outbound_clone = outbound.clone();
             let server_url_clone = server_url.to_string();
+            let api_key_clone = api_key.to_string();
             let launch_id_clone = launch_id.clone();
             let agent_id_for_task = agent_id.clone();
             let delivery_clone = value.clone();
@@ -852,6 +853,7 @@ async fn handle_server_message(
                     &agent_id_for_task,
                     &delivery_clone,
                     &server_url_clone,
+                    &api_key_clone,
                     launch_id_clone.as_deref(),
                     &outbound_clone,
                 )
@@ -1477,6 +1479,7 @@ fn prepare_delivery_prompt(
     name: &str,
     description: &str,
     delivery: &serde_json::Value,
+    downloaded: &[DownloadedAttachment],
 ) -> Option<String> {
     let msg = delivery.get("message")?;
     let content = msg
@@ -1568,9 +1571,102 @@ fn prepare_delivery_prompt(
         )
     };
 
+    let attachment_note = if downloaded.is_empty() {
+        String::new()
+    } else {
+        let files = downloaded
+            .iter()
+            .map(|d| format!("- {}", d.filename))
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!(
+            "\n\nThe following attached file{} been downloaded to your workspace `notes/` folder and are available for review:\n{files}",
+            if downloaded.len() == 1 { " has" } else { "s have" }
+        )
+    };
+
     Some(format!(
-        "{context_header}New message received:\n\n[target={target} msg={msg_id} time={time} type={sender_type}] @{sender_name}: {content_with_attachments}\n\n{instruction}"
+        "{context_header}New message received:\n\n[target={target} msg={msg_id} time={time} type={sender_type}] @{sender_name}: {content_with_attachments}\n\n{instruction}{attachment_note}"
     ))
+}
+
+/// A file that the daemon downloaded from the server and saved into the agent's
+/// workspace so the agent can read it.
+#[derive(Debug, Clone)]
+struct DownloadedAttachment {
+    filename: String,
+    #[allow(dead_code)]
+    path: std::path::PathBuf,
+}
+
+/// Download any attachments referenced in a delivery and save them to the
+/// agent's workspace `notes/` folder. Returns the list of successfully saved
+/// files. Failures are logged but do not block the turn.
+async fn download_delivery_attachments(
+    delivery: &serde_json::Value,
+    server_url: &str,
+    daemon_api_key: &str,
+    workspace: &std::path::Path,
+) -> Vec<DownloadedAttachment> {
+    let attachments: &[serde_json::Value] = delivery
+        .pointer("/message/attachments")
+        .and_then(|v| v.as_array())
+        .map_or(&[], std::vec::Vec::as_slice);
+    if attachments.is_empty() {
+        return Vec::new();
+    }
+
+    let notes_dir = workspace.join("notes");
+    if let Err(err) = tokio::fs::create_dir_all(&notes_dir).await {
+        warn!(error = %err, dir = %notes_dir.display(), "failed to create notes directory");
+        return Vec::new();
+    }
+
+    let mut downloaded = Vec::new();
+    for attachment in attachments {
+        let Some(id) = attachment.get("id").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let filename = attachment
+            .get("filename")
+            .and_then(|v| v.as_str())
+            .map_or_else(|| format!("attachment-{id}"), sanitize_attachment_filename);
+        let path = notes_dir.join(&filename);
+
+        match download_attachment(server_url, daemon_api_key, id).await {
+            Ok(bytes) => {
+                match tokio::fs::write(&path, &bytes).await {
+                    Ok(()) => {
+                        info!(
+                            attachment_id = %id,
+                            filename = %filename,
+                            path = %path.display(),
+                            "downloaded attachment to workspace"
+                        );
+                        downloaded.push(DownloadedAttachment { filename, path });
+                    }
+                    Err(err) => {
+                        warn!(error = %err, path = %path.display(), "failed to write attachment to workspace");
+                    }
+                }
+            }
+            Err(err) => {
+                warn!(error = %err, attachment_id = %id, "failed to download attachment");
+            }
+        }
+    }
+
+    downloaded
+}
+
+/// Sanitize an attachment filename by taking only the final path component so
+/// a malicious server can't write outside the workspace with `../../../` etc.
+fn sanitize_attachment_filename(name: &str) -> String {
+    std::path::Path::new(name)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("attachment")
+        .to_string()
 }
 
 /// Format an attachment suffix that mirrors the npm daemon's hint: it lists
@@ -1612,6 +1708,7 @@ async fn run_agent_turn(
     agent_id: &str,
     delivery: &serde_json::Value,
     server_url: &str,
+    daemon_api_key: &str,
     launch_id: Option<&str>,
     outbound: &mpsc::Sender<WsMessage>,
 ) {
@@ -1626,10 +1723,20 @@ async fn run_agent_turn(
         return;
     };
 
+    // Download any attachments before building the prompt so the agent sees
+    // the files in its workspace and can reference them in its reply.
+    let downloaded = download_delivery_attachments(
+        delivery,
+        server_url,
+        daemon_api_key,
+        &process.workspace,
+    )
+    .await;
+
     // Decide whether to respond and build a prompt that mirrors the npm
     // daemon's stdin format (target, sender, context) plus an explicit
     // instruction to only reply when addressed.
-    let Some(prompt) = prepare_delivery_prompt(agent_id, &process.name, &process.description, delivery) else {
+    let Some(prompt) = prepare_delivery_prompt(agent_id, &process.name, &process.description, delivery, &downloaded) else {
         return;
     };
 
@@ -2340,7 +2447,7 @@ mod tests {
                 "channel_name": "general",
             }
         });
-        assert!(prepare_delivery_prompt(agent_id, "Agent", "A test agent", &delivery).is_none());
+        assert!(prepare_delivery_prompt(agent_id, "Agent", "A test agent", &delivery, &[]).is_none());
     }
 
     #[test]
@@ -2355,7 +2462,7 @@ mod tests {
                 "channel_name": "general",
             }
         });
-        assert!(prepare_delivery_prompt("ag_123", "Agent", "A test agent", &delivery).is_none());
+        assert!(prepare_delivery_prompt("ag_123", "Agent", "A test agent", &delivery, &[]).is_none());
     }
 
     #[test]
@@ -2370,7 +2477,7 @@ mod tests {
                 "sender_name": "other-bot",
             }
         });
-        let prompt = prepare_delivery_prompt("ag_123", "Agent", "A test agent", &delivery).unwrap();
+        let prompt = prepare_delivery_prompt("ag_123", "Agent", "A test agent", &delivery, &[]).unwrap();
         assert!(prompt.contains("hello"));
         assert!(prompt.contains("New message received:"));
     }
@@ -2387,7 +2494,7 @@ mod tests {
                 "channel_name": "general",
             }
         });
-        let prompt = prepare_delivery_prompt("ag_123", "Agent", "A test agent", &delivery).unwrap();
+        let prompt = prepare_delivery_prompt("ag_123", "Agent", "A test agent", &delivery, &[]).unwrap();
         assert!(prompt.contains("can you help?"));
         assert!(prompt.contains("@alice"));
         assert!(prompt.contains("#general"));
@@ -2409,7 +2516,7 @@ mod tests {
                 "channel_name": "dev",
             }
         });
-        let prompt = prepare_delivery_prompt("ag_123", "Coder", "Fixes bugs", &delivery).unwrap();
+        let prompt = prepare_delivery_prompt("ag_123", "Coder", "Fixes bugs", &delivery, &[]).unwrap();
         assert!(prompt.contains("You are Coder. Fixes bugs"));
         assert!(prompt.contains("[target=#dev msg=msg_abc"));
         assert!(prompt.contains("type=human] @bob: fix the bug"));
@@ -2437,7 +2544,7 @@ mod tests {
                 ]
             }
         });
-        let prompt = prepare_delivery_prompt("ag_123", "Arnold", "Marketing agent", &delivery).unwrap();
+        let prompt = prepare_delivery_prompt("ag_123", "Arnold", "Marketing agent", &delivery, &[]).unwrap();
         assert!(prompt.contains("[1 attachment: kickstarter-to-production.md (id:908ec5ab-4f0e-4cc6-8afb-443175b37e05)"));
         assert!(prompt.contains("raft attachment view"));
     }
@@ -2463,7 +2570,7 @@ mod tests {
                 ]
             }
         });
-        let prompt = prepare_delivery_prompt("ag_123", "Arnold", "Marketing agent", &delivery).unwrap();
+        let prompt = prepare_delivery_prompt("ag_123", "Arnold", "Marketing agent", &delivery, &[]).unwrap();
         assert!(prompt.contains("doc.md (id:doc-id)"));
         assert!(prompt.contains("@jared:"));
     }
