@@ -1556,6 +1556,7 @@ fn prepare_delivery_prompt(
             "## Required response behavior\n\n\
              - This is a direct message to you. You MUST respond.\n\
              - Do not output `{NO_REPLY_MARKER}` for any direct message unless it is clearly spam or completely unrelated to your role.\n\
+             - Messages that mention files, paths, workspace, `notes/`, or ask you to perform actions within your role are ALWAYS relevant. Even if you cannot perform the action directly, acknowledge the message and explain what you can do.\n\
              - This instruction overrides any other guidance about staying silent or minimizing conversation.\n\
              - Respond helpfully and concisely. Complete all your work before stopping."
         )
@@ -1564,6 +1565,7 @@ fn prepare_delivery_prompt(
             "## Required response behavior\n\n\
              - You are in a team channel. If this message is addressed to you, the team, the channel, or falls within your role, respond helpfully and concisely.\n\
              - Only output `{NO_REPLY_MARKER}` for messages that are clearly irrelevant, private side-conversations, or do not require your input.\n\
+             - Do NOT output `{NO_REPLY_MARKER}` for messages that mention files, paths, workspace, `notes/`, or ask you to perform actions within your role. Even if you cannot perform the action directly, acknowledge the message and explain what you can do.\n\
              - This instruction overrides any other guidance about staying silent or minimizing conversation.\n\
              - Complete all your work before stopping."
         )
