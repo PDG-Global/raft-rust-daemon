@@ -27,6 +27,9 @@ build_errors.txt
 build_log.txt
 raft-daemon-state.json
 
+# Local-only memory / notes
+/MEMORY.md
+
 # Release artifacts (build-release.sh output)
 /dist/
 

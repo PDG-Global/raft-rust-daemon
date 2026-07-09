@@ -10,6 +10,8 @@
 
 - **代理生命周期管理** — 通过 Raft 服务器启动、停止、重启和重置代理
 - **消息投递** — 从 Raft 接收消息并分发给代理
+- **代理可用 `raft`/`slock` CLI** — 通过本地代理 API 代理使用提醒、任务、收件箱和历史命令
+- **本地代理 API 代理** — 使用短生命周期代理令牌交换真实代理凭证，并转发调用到 Raft 服务器
 - **RustyCLI 运行时** — 默认的 `builtin` 运行时由 RustyCLI 驱动
 - **多配置文件支持** — 使用 `--profile` 运行多个相互隔离的守护进程实例
 - **运行中代理持久化** — 已启动的代理保存到 `state.json`，重连后自动恢复
@@ -18,6 +20,22 @@
 - **可选自动更新** — 在空闲且处于安静时段时自动从 GitHub 下载并安装新版本
 
 ## 安装
+
+### 快速安装脚本
+
+在 macOS、Linux 或 FreeBSD 上最简单的方式是使用发布安装脚本。它会自动检测你的平台和架构，下载对应二进制文件，验证 SHA-256 校验和，并安装到 `/usr/local/bin`：
+
+```bash
+curl -L -o install.sh https://github.com/PDG-Global/raft-rust-daemon/releases/latest/download/install.sh
+chmod +x install.sh
+./install.sh
+```
+
+安装到自定义位置（例如 `~/.local/bin`）：
+
+```bash
+./install.sh --prefix ~/.local
+```
 
 ### 预编译二进制文件
 
@@ -148,7 +166,32 @@ raft-daemon --server-url https://api.raft.build --api-key <key> \
 在 Unix 上，重启使用 `exec`，因此守护进程保持相同的 PID，配置文件中的
 PID 文件也仍然有效。
 
-### 代理管理（脚手架）
+### 代理可用 CLI (`raft` / `slock`)
+
+代理启动时，守护进程会在 `~/.raft-daemon/profiles/<profile>/bin/` 中创建 `raft` 和 `slock` 包装脚本，并将该目录加入代理的 `PATH`。在 RustyCLI 内部，代理可以通过本地代理 API 代理使用以下命令与 Raft 服务器交互：
+
+```bash
+# 提醒
+raft reminder create --title "Follow up with Jeremy" --fire-at "2026-07-10T14:00:00Z"
+raft reminder list
+raft reminder delete <reminder-id>
+
+# 任务（channel 为带前导 # 的频道名称，例如 '#Marketing'）
+raft task list --channel '#Marketing'
+raft task create --channel '#Marketing' --title "Write blog post"
+raft task claim --channel '#Marketing' --task-number 7
+raft task update-status --channel '#Marketing' --task-number 7 --status done
+raft task unclaim --channel '#Marketing' --task-number 7
+
+# 收件箱、历史记录和服务器信息
+raft inbox
+raft history --channel '#Marketing'
+raft server
+```
+
+代理令牌、代理 URL 和当前消息 ID 通过环境变量传递给 RustyCLI，因此代理无需提供 `--msg-id` 或 API 密钥。
+
+### 守护进程代理管理（脚手架）
 
 `agent` 子命令已解析和分发，但目前仅打印占位符。代理的实际启动和停止由 Raft 服务器通过守护进程 WebSocket 控制。
 
@@ -184,16 +227,21 @@ raft-daemon agent status <agent_id>
 raft-daemon-rust/
 ├── Cargo.toml
 ├── README.md
+├── README.zh-CN.md
+├── CHANGELOG.md
+├── install.sh
 ├── build-release.sh
 ├── src/
 │   ├── main.rs
 │   ├── cli/
 │   │   ├── args.rs
 │   │   ├── commands.rs
-│   │   └── mod.rs
+│   │   ├── mod.rs
+│   │   └── raft_cli.rs          # 内嵌 raft/slock 代理 CLI
 │   ├── daemon/
 │   │   ├── mod.rs
 │   │   ├── runner.rs
+│   │   ├── proxy.rs             # 本地代理 API HTTP 代理
 │   │   ├── agent/
 │   │   │   ├── mod.rs
 │   │   │   ├── manager.rs

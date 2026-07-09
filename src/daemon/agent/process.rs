@@ -770,7 +770,11 @@ pub fn resolve_rustycli_path() -> Option<PathBuf> {
 ///
 /// Returns an error if RustyCLI isn't installed, the spawn fails, or the
 /// child exits non-zero.
-pub async fn run_one_turn(process: &AgentProcess, prompt: &str) -> Result<String> {
+pub async fn run_one_turn(
+    process: &AgentProcess,
+    prompt: &str,
+    message_id: Option<&str>,
+) -> Result<String> {
     let binary = resolve_rustycli_path().context(
         "RustyCLI binary not found; install it or set RAFT_RUSTY_BINARY. \
          Until then this daemon cannot run agents.",
@@ -827,6 +831,9 @@ pub async fn run_one_turn(process: &AgentProcess, prompt: &str) -> Result<String
     }
     if let Some(token_file) = &process.agent_proxy_token_file {
         cmd.env("SLOCK_AGENT_PROXY_TOKEN_FILE", token_file);
+    }
+    if let Some(id) = message_id {
+        cmd.env("SLOCK_MESSAGE_ID", id);
     }
 
     let bin_dir = process.home.join("bin");

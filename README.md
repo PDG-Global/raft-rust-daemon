@@ -12,6 +12,8 @@ Read this in other languages: [简体中文](README.zh-CN.md)
 
 - **Agent lifecycle management** — start, stop, restart, and reset agents via the raft server
 - **Message delivery** — receive messages from raft and dispatch them to agents
+- **Agent-facing `raft`/`slock` CLI** — bundled commands for reminders, tasks, inbox, and history via a local agent-api proxy
+- **Local agent-api proxy** — swaps short-lived proxy tokens for agent credentials and forwards calls to the raft server
 - **RustyCLI-backed runtime** — the default `builtin` runtime is powered by RustyCLI
 - **Multi-profile support** — run multiple isolated daemon instances with `--profile`
 - **Running-agent persistence** — started agents are saved to `state.json` and restored on reconnect
@@ -20,6 +22,24 @@ Read this in other languages: [简体中文](README.zh-CN.md)
 - **Optional self-update** — automatically download and install new releases from GitHub while idle and during quiet hours
 
 ## Installation
+
+### Quick install script
+
+The easiest way to install on macOS, Linux, or FreeBSD is the release install
+script. It detects your platform and architecture, downloads the matching
+binary, verifies the SHA-256 checksum, and installs it to `/usr/local/bin`:
+
+```bash
+curl -L -o install.sh https://github.com/PDG-Global/raft-rust-daemon/releases/latest/download/install.sh
+chmod +x install.sh
+./install.sh
+```
+
+To install to a custom location (e.g. `~/.local/bin`):
+
+```bash
+./install.sh --prefix ~/.local
+```
 
 ### Prebuilt binaries
 
@@ -151,9 +171,40 @@ raft-daemon --server-url https://api.raft.build --api-key <key> \
 The restart uses `exec` on Unix, so the daemon keeps the same PID and the
 profile's PID file remains valid.
 
-### Agent management (scaffolding)
+### Agent-facing CLI (`raft` / `slock`)
 
-The `agent` subcommands are parsed and dispatched, but they currently print placeholders. Agents are started and stopped by the raft server via the daemon WebSocket.
+When an agent starts, the daemon creates `raft` and `slock` wrapper scripts in
+`~/.raft-daemon/profiles/<profile>/bin/` and puts that directory on the agent's
+`PATH`. Inside RustyCLI, the agent can use these commands to interact with the
+Raft server through the local agent-api proxy:
+
+```bash
+# Reminders
+raft reminder create --title "Follow up with Jeremy" --fire-at "2026-07-10T14:00:00Z"
+raft reminder list
+raft reminder delete <reminder-id>
+
+# Tasks (channel is the channel name with a leading #, e.g. '#Marketing')
+raft task list --channel '#Marketing'
+raft task create --channel '#Marketing' --title "Write blog post"
+raft task claim --channel '#Marketing' --task-number 7
+raft task update-status --channel '#Marketing' --task-number 7 --status done
+raft task unclaim --channel '#Marketing' --task-number 7
+
+# Inbox, history, and server info
+raft inbox
+raft history --channel '#Marketing'
+raft server
+```
+
+The proxy token, proxy URL, and current message ID are passed to RustyCLI as
+environment variables, so agents do not need to provide `--msg-id` or API keys.
+
+### Daemon agent management (scaffolding)
+
+The `agent` subcommands are parsed and dispatched, but they currently print
+placeholders. Agents are started and stopped by the raft server via the daemon
+WebSocket.
 
 ```bash
 raft-daemon agent list
@@ -187,16 +238,21 @@ Each profile is isolated under its own home directory.
 raft-daemon-rust/
 ├── Cargo.toml
 ├── README.md
+├── README.zh-CN.md
+├── CHANGELOG.md
+├── install.sh
 ├── build-release.sh
 ├── src/
 │   ├── main.rs
 │   ├── cli/
 │   │   ├── args.rs
 │   │   ├── commands.rs
-│   │   └── mod.rs
+│   │   ├── mod.rs
+│   │   └── raft_cli.rs          # bundled raft/slock agent CLI
 │   ├── daemon/
 │   │   ├── mod.rs
 │   │   ├── runner.rs
+│   │   ├── proxy.rs             # local agent-api HTTP proxy
 │   │   ├── agent/
 │   │   │   ├── mod.rs
 │   │   │   ├── manager.rs

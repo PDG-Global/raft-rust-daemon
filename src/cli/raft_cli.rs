@@ -95,6 +95,9 @@ pub enum ReminderCommand {
         /// Channel to post the reminder in.
         #[arg(long)]
         channel: Option<String>,
+        /// Optional message ID to associate with the reminder.
+        #[arg(long)]
+        msg_id: Option<String>,
         /// Optional JSON payload.
         #[arg(long)]
         payload: Option<String>,
@@ -153,6 +156,15 @@ pub enum TaskCommand {
         /// New status.
         #[arg(long)]
         status: String,
+    },
+    /// Unclaim a task.
+    Unclaim {
+        /// Channel ID.
+        #[arg(long)]
+        channel: String,
+        /// Task number.
+        #[arg(long)]
+        task_number: i64,
     },
 }
 
@@ -238,10 +250,13 @@ async fn dispatch(
                     fire_at,
                     delay_seconds,
                     channel,
+                    msg_id,
                     payload,
                 },
         } => {
             let mut body = json!({ "title": title });
+            let msg_id = msg_id
+                .or_else(|| std::env::var("SLOCK_MESSAGE_ID").ok());
             if let Some(t) = fire_at {
                 body["fireAt"] = json!(t);
             }
@@ -250,6 +265,9 @@ async fn dispatch(
             }
             if let Some(c) = channel {
                 body["channel"] = json!(c);
+            }
+            if let Some(id) = msg_id {
+                body["msgId"] = json!(id);
             }
             if let Some(p) = payload {
                 body["payload"] = serde_json::from_str(&p).unwrap_or(json!(p));
@@ -332,6 +350,15 @@ async fn dispatch(
                 "status": status,
             });
             post_json(client, &format!("{base}/tasks/update-status"), token, &body).await
+        }
+        RaftCommand::Task {
+            command: TaskCommand::Unclaim { channel, task_number },
+        } => {
+            let body = json!({
+                "channel": channel,
+                "task_number": task_number,
+            });
+            post_json(client, &format!("{base}/tasks/unclaim"), token, &body).await
         }
         RaftCommand::Inbox => get_json(client, &format!("{base}/inbox"), token).await,
         RaftCommand::Events { since, limit } => {

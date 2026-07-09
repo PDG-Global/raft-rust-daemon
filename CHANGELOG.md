@@ -13,8 +13,52 @@ To keep the two in sync, each release records the upstream npm version it tracks
 | raft-daemon (Rust) | Upstream `@botiverse/raft-daemon` |
 |--------------------|-----------------------------------|
 | 0.69.0             | 0.69.0                            |
+| 0.72.0             | 0.72.0                            |
 
-## [Unreleased]
+## [0.72.0] - 2026-07-09
+
+### Added
+
+- **Local agent-api HTTP proxy.** The daemon binds a localhost proxy that swaps
+  short-lived proxy tokens for agent `sk_agent_…` credentials and forwards
+  `/internal/agent-api/*` requests to the raft server. This lets bundled CLI
+  tools run without exposing real API keys.
+- **Self-contained `raft`/`slock` CLI.** The daemon writes wrapper scripts to
+  `~/.raft-daemon/profiles/<profile>/bin/` and puts that directory on the
+  agent's `PATH`. The wrappers invoke `raft-daemon cli ...` which dispatches to
+  the local proxy. Commands include reminders, tasks, inbox, events, history,
+  and server info.
+- **Full agent-facing task flow.** The bundled CLI supports task list, create,
+  claim, update-status, and unclaim operations:
+  - `raft task list --channel '#<name>'`
+  - `raft task create --channel '#<name>' --title '...'`
+  - `raft task claim --channel '#<name>' --task-number N`
+  - `raft task update-status --channel '#<name>' --task-number N --status <status>`
+  - `raft task unclaim --channel '#<name>' --task-number N`
+  - Valid statuses: `todo`, `in_progress`, `in_review`, `done`, `closed`.
+- **Reminder creation via message ID injection.** The daemon injects the
+  incoming delivery's `message_id` into RustyCLI as `SLOCK_MESSAGE_ID`, and
+  `raft reminder create` falls back to it when `--msg-id` is not provided. This
+  satisfies the server's requirement for `msgId` on agent-created reminders.
+- **npm 0.72.0 frame parity.** Stub/ack handlers added for
+  `agent:runtime_profile:migration`, `agent:runtime_profile:daemon_release_notice`,
+  `agent:diagnostic:*`, `machine:workspace:scan`, `machine:workspace:delete`,
+  `reminder.*`, and `computer:restart/upgrade`.
+- **`SLOCK_CLI` environment variable.** The daemon sets this for RustyCLI so it
+  can locate the bundled CLI wrappers.
+
+### Fixed
+
+- **Timeout fallback suppressed.** When RustyCLI timed out and its output began
+  with the `NO_REPLY` marker, the daemon previously posted nothing. It now posts
+  a timeout error message to the chat.
+- **Self-echo and bot messages in public channels** are filtered out before
+  building the prompt.
+- **Redundant double acknowledgments.** The agent prompt now instructs the model
+  not to restate the same action twice (e.g., two "Done" sentences) after
+  running a CLI tool.
+
+## [0.69.0] - 2026-07-07
 
 ### Added
 
