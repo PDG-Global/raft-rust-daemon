@@ -33,7 +33,7 @@ use tokio::time::timeout;
 use tracing::{info, warn};
 
 use crate::daemon::paths;
-use crate::daemon::runner::starts_with_no_reply_marker;
+use crate::daemon::runner::is_no_reply_response;
 
 /// Maximum time a single RustyCLI turn is allowed to run before the daemon
 /// kills it and returns an error. Prevents a hung tool/LLM call from blocking
@@ -920,7 +920,7 @@ pub async fn run_one_turn(
             // reasoning. Treat that as a timeout error so the agent posts a
             // fallback message instead of silently suppressing the partial
             // output as a normal "no reply".
-            if starts_with_no_reply_marker(trimmed) {
+            if is_no_reply_response(trimmed) {
                 anyhow::bail!(
                     "RustyCLI turn timed out after {} seconds; partial response began with NO_REPLY marker",
                     RUSTY_TURN_TIMEOUT.as_secs()

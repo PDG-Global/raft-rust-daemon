@@ -58,13 +58,17 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
 /// not post this marker (or an empty response) to raft.
 const NO_REPLY_MARKER: &str = "NO_REPLY";
 
-/// Returns true if the trimmed response starts with the `NO_REPLY` marker,
-/// case-insensitive. If the model emits the marker, the entire response is
-/// discarded rather than posted to raft.
-pub(crate) fn starts_with_no_reply_marker(s: &str) -> bool {
+/// Returns true if the trimmed response starts or ends with the `NO_REPLY`
+/// marker, case-insensitive. If the model emits the marker, the entire
+/// response is discarded rather than posted to raft.
+pub(crate) fn is_no_reply_response(s: &str) -> bool {
     let s = s.trim();
-    s.len() >= NO_REPLY_MARKER.len()
-        && s[..NO_REPLY_MARKER.len()].eq_ignore_ascii_case(NO_REPLY_MARKER)
+    if s.len() < NO_REPLY_MARKER.len() {
+        return false;
+    }
+    let prefix = &s[..NO_REPLY_MARKER.len()];
+    let suffix = &s[s.len() - NO_REPLY_MARKER.len()..];
+    prefix.eq_ignore_ascii_case(NO_REPLY_MARKER) || suffix.eq_ignore_ascii_case(NO_REPLY_MARKER)
 }
 
 /// Options describing how to start the daemon.
@@ -1797,7 +1801,7 @@ fn prepare_delivery_prompt(
             "## Required response behavior\n\n\
              - This is a direct message to you from @{sender_name}. You MUST respond.\n\
              - Respond as {name} in a natural, conversational tone. Your reply should read like a person replying to the last message, not a stream-of-consciousness log.\n\
-             - Do not narrate your internal tool steps (e.g. \"Let me check...\", \"Found the issue...\", \"Build succeeded...\"). Do the work silently, then summarize what you did or ask a clarifying question. Do not repeat the same information twice; if you run a CLI tool successfully, give a single brief acknowledgment in one sentence and do not restate the action or append another confirmation like \"Done.\" or \"Confirmed.\".\n\
+             - Do not narrate your internal tool steps (e.g. \"Let me check...\", \"Found the issue...\", \"Build succeeded...\"). Do the work silently, then summarize what you did or ask a clarifying question. Do not repeat the same information twice; if you run a CLI tool successfully, give a single brief acknowledgment in one sentence and do not restate the action or append another confirmation like \"Done.\" or \"Confirmed.\". Do not echo or quote the raw output of a CLI tool. If a message does not require a chat response (e.g., system notifications, fired reminders, scheduled events, or content irrelevant to you), output ONLY the literal string `{NO_REPLY_MARKER}` and nothing else. No explanation, no summary, no punctuation, and no markdown.\n\
              - You have access to the `raft` CLI in this workspace. Use it to create reminders (`raft reminder create --title \"...\" --fire-at \"...\"`), manage tasks (`raft task list --channel '#{channel_name}'`, `raft task create --channel '#{channel_name}' --title \"...\"`, `raft task claim --channel '#{channel_name}' --task-number N`, `raft task update-status --channel '#{channel_name}' --task-number N --status done`), read your inbox, and send messages. When asked to set a reminder or task, invoke the CLI rather than saying you cannot do it.\n\
              - Do NOT push to git, deploy, or run any externally-visible command unless the user explicitly asked you to. If you are unsure whether to push/deploy, ask first.\n\
              - The sender is the person you are talking to. If they ask you to do something within your role, do it or ask clarifying questions. Never respond with \"that's [someone's] job\" or refuse on the basis that another person should do it.\n\
@@ -1811,7 +1815,7 @@ fn prepare_delivery_prompt(
             "## Required response behavior\n\n\
              - You are in a team channel. If this message is addressed to you, the team, the channel, or falls within your role, respond helpfully and concisely.\n\
              - Respond as {name} in a natural, conversational tone. Your reply should read like a person replying to the last message, not a stream-of-consciousness log.\n\
-             - Do not narrate your internal tool steps (e.g. \"Let me check...\", \"Found the issue...\", \"Build succeeded...\"). Do the work silently, then summarize what you did or ask a clarifying question. Do not repeat the same information twice; if you run a CLI tool successfully, give a single brief acknowledgment in one sentence and do not restate the action or append another confirmation like \"Done.\" or \"Confirmed.\".\n\
+             - Do not narrate your internal tool steps (e.g. \"Let me check...\", \"Found the issue...\", \"Build succeeded...\"). Do the work silently, then summarize what you did or ask a clarifying question. Do not repeat the same information twice; if you run a CLI tool successfully, give a single brief acknowledgment in one sentence and do not restate the action or append another confirmation like \"Done.\" or \"Confirmed.\". Do not echo or quote the raw output of a CLI tool. If a message does not require a chat response (e.g., system notifications, fired reminders, scheduled events, or content irrelevant to you), output ONLY the literal string `{NO_REPLY_MARKER}` and nothing else. No explanation, no summary, no punctuation, and no markdown.\n\
              - You have access to the `raft` CLI in this workspace. Use it to create reminders (`raft reminder create --title \"...\" --fire-at \"...\"`), manage tasks (`raft task list --channel '#{channel_name}'`, `raft task create --channel '#{channel_name}' --title \"...\"`, `raft task claim --channel '#{channel_name}' --task-number N`, `raft task update-status --channel '#{channel_name}' --task-number N --status done`), read your inbox, and send messages. When asked to set a reminder or task, invoke the CLI rather than saying you cannot do it.\n\
              - Do NOT push to git, deploy, or run any externally-visible command unless the user explicitly asked you to. If you are unsure whether to push/deploy, ask first.\n\
              - The sender @{sender_name} is the person you are talking to. If they ask you to do something within your role, do it or ask clarifying questions. Never respond with \"that's [someone's] job\" or refuse on the basis that another person should do it.\n\
@@ -2041,7 +2045,7 @@ async fn run_agent_turn(
             );
             tracing::info!(target: "raft_daemon::agent::response", agent_id = agent_id, response = %trimmed);
 
-            if trimmed.is_empty() || starts_with_no_reply_marker(trimmed) {
+            if trimmed.is_empty() || is_no_reply_response(trimmed) {
                 tracing::debug!(agent_id = %agent_id, "rusty chose not to reply; skipping raft post");
             } else {
                 // POST the response to raft so it shows up in chat.
@@ -2904,22 +2908,30 @@ mod tests {
     }
 
     #[test]
-    fn starts_with_no_reply_marker_detects_exact_marker() {
-        assert!(starts_with_no_reply_marker("NO_REPLY"));
+    fn is_no_reply_response_detects_exact_marker() {
+        assert!(is_no_reply_response("NO_REPLY"));
     }
 
     #[test]
-    fn starts_with_no_reply_marker_detects_prefixed_response() {
-        assert!(starts_with_no_reply_marker(
+    fn is_no_reply_response_detects_prefixed_response() {
+        assert!(is_no_reply_response(
             "NO_REPLY\n\nThese messages aren't relevant."
         ));
-        assert!(starts_with_no_reply_marker("  no_reply here is content"));
+        assert!(is_no_reply_response("  no_reply here is content"));
     }
 
     #[test]
-    fn starts_with_no_reply_marker_is_false_for_normal_response() {
-        assert!(!starts_with_no_reply_marker("Here is the answer."));
-        assert!(!starts_with_no_reply_marker("The answer is no_reply."));
+    fn is_no_reply_response_detects_suffixed_response() {
+        assert!(is_no_reply_response(
+            "Nothing else pending in #Marketing.\nNO_REPLY"
+        ));
+        assert!(is_no_reply_response("some content  no_reply"));
+    }
+
+    #[test]
+    fn is_no_reply_response_is_false_for_normal_response() {
+        assert!(!is_no_reply_response("Here is the answer."));
+        assert!(!is_no_reply_response("The answer is no_reply."));
     }
 
     #[test]
