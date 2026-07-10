@@ -1794,7 +1794,11 @@ fn prepare_delivery_prompt(
 
     // RustyCLI reads MEMORY.md and notes/ from the workspace automatically,
     // so the daemon no longer injects them into the prompt.
-    let context_header = format!("You are {name}. {description}\n\n");
+    let context_header = if is_dm {
+        format!("You are {name}. {description}\n\n")
+    } else {
+        format!("You are {name}. {description}\nYou are currently in {target}.\n\n")
+    };
 
     let instruction = if is_dm {
         format!(
@@ -1802,6 +1806,7 @@ fn prepare_delivery_prompt(
              - This is a direct message to you from @{sender_name}. You MUST respond.\n\
              - Respond as {name} in a natural, conversational tone. Your reply should read like a person replying to the last message, not a stream-of-consciousness log.\n\
              - Do not narrate your internal tool steps (e.g. \"Let me check...\", \"Found the issue...\", \"Build succeeded...\"). Do the work silently, then summarize what you did or ask a clarifying question. Do not repeat the same information twice; if you run a CLI tool successfully, give a single brief acknowledgment in one sentence and do not restate the action or append another confirmation like \"Done.\" or \"Confirmed.\". Do not echo or quote the raw output of a CLI tool. If a message does not require a chat response (e.g., system notifications, fired reminders, scheduled events, or content irrelevant to you), output ONLY the literal string `{NO_REPLY_MARKER}` and nothing else. No explanation, no summary, no punctuation, and no markdown.\n\
+             - Do not report, summarize, or confirm actions you have already taken, and do not mention MEMORY.md, previous sessions, or conversation compaction in your reply. The user only needs your response to the current message.\n\
              - You have access to the `raft` CLI in this workspace. Use it to create reminders (`raft reminder create --title \"...\" --fire-at \"...\"`), manage tasks (`raft task list --channel '#{channel_name}'`, `raft task create --channel '#{channel_name}' --title \"...\"`, `raft task claim --channel '#{channel_name}' --task-number N`, `raft task update-status --channel '#{channel_name}' --task-number N --status done`), read your inbox, and send messages. When asked to set a reminder or task, invoke the CLI rather than saying you cannot do it.\n\
              - Do NOT push to git, deploy, or run any externally-visible command unless the user explicitly asked you to. If you are unsure whether to push/deploy, ask first.\n\
              - The sender is the person you are talking to. If they ask you to do something within your role, do it or ask clarifying questions. Never respond with \"that's [someone's] job\" or refuse on the basis that another person should do it.\n\
@@ -1816,6 +1821,7 @@ fn prepare_delivery_prompt(
              - You are in a team channel. If this message is addressed to you, the team, the channel, or falls within your role, respond helpfully and concisely.\n\
              - Respond as {name} in a natural, conversational tone. Your reply should read like a person replying to the last message, not a stream-of-consciousness log.\n\
              - Do not narrate your internal tool steps (e.g. \"Let me check...\", \"Found the issue...\", \"Build succeeded...\"). Do the work silently, then summarize what you did or ask a clarifying question. Do not repeat the same information twice; if you run a CLI tool successfully, give a single brief acknowledgment in one sentence and do not restate the action or append another confirmation like \"Done.\" or \"Confirmed.\". Do not echo or quote the raw output of a CLI tool. If a message does not require a chat response (e.g., system notifications, fired reminders, scheduled events, or content irrelevant to you), output ONLY the literal string `{NO_REPLY_MARKER}` and nothing else. No explanation, no summary, no punctuation, and no markdown.\n\
+             - Do not report, summarize, or confirm actions you have already taken, and do not mention MEMORY.md, previous sessions, or conversation compaction in your reply. The user only needs your response to the current message.\n\
              - You have access to the `raft` CLI in this workspace. Use it to create reminders (`raft reminder create --title \"...\" --fire-at \"...\"`), manage tasks (`raft task list --channel '#{channel_name}'`, `raft task create --channel '#{channel_name}' --title \"...\"`, `raft task claim --channel '#{channel_name}' --task-number N`, `raft task update-status --channel '#{channel_name}' --task-number N --status done`), read your inbox, and send messages. When asked to set a reminder or task, invoke the CLI rather than saying you cannot do it.\n\
              - Do NOT push to git, deploy, or run any externally-visible command unless the user explicitly asked you to. If you are unsure whether to push/deploy, ask first.\n\
              - The sender @{sender_name} is the person you are talking to. If they ask you to do something within your role, do it or ask clarifying questions. Never respond with \"that's [someone's] job\" or refuse on the basis that another person should do it.\n\
